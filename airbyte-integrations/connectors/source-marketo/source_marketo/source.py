@@ -183,7 +183,7 @@ class MarketoExportBase(IncrementalMarketoStream):
         return f"bulk/v1/{self.stream_name}/export/{stream_slice['id']}/file.json"
 
     def stream_slices(
-        self, sync_mode, stream_state: MutableMapping[str, Any] = None, **kwargs
+            self, sync_mode, stream_state: MutableMapping[str, Any] = None, **kwargs
     ) -> Iterable[Optional[MutableMapping[str, any]]]:
         date_slices = super().stream_slices(sync_mode, stream_state, **kwargs)
 
@@ -250,11 +250,11 @@ class MarketoExportBase(IncrementalMarketoStream):
             yield new_record
 
     def read_records(
-        self,
-        sync_mode: SyncMode,
-        cursor_field: List[str] = None,
-        stream_slice: Mapping[str, Any] = None,
-        stream_state: Mapping[str, Any] = None,
+            self,
+            sync_mode: SyncMode,
+            cursor_field: List[str] = None,
+            stream_slice: Mapping[str, Any] = None,
+            stream_state: Mapping[str, Any] = None,
     ) -> Iterable[Mapping[str, Any]]:
         self.sleep_till_export_completed(stream_slice)
         return super().read_records(sync_mode, cursor_field, stream_slice, stream_state)
@@ -354,38 +354,145 @@ class MarketoExportStatus(MarketoStream):
 
 class Leads(MarketoExportBase):
     """
-    Return list of all leeds.
+    Return list of all leads with dynamic schema including custom fields.
     API Docs: https://developers.marketo.com/rest-api/bulk-extract/bulk-lead-extract/
     """
 
     cursor_field = "updatedAt"
 
+    # Marketo dataType to JSON Schema type mapping
+    MARKETO_TYPE_MAPPING = {
+        # Integer types
+        "integer": {"type": ["integer", "null"]},
+        "score": {"type": ["integer", "null"]},
+        "percent": {"type": ["integer", "null"]},
+        # Number types
+        "float": {"type": ["number", "null"]},
+        "currency": {"type": ["number", "null"]},
+        # Boolean
+        "boolean": {"type": ["boolean", "null"]},
+        # Date types
+        "date": {"type": ["string", "null"], "format": "date"},
+        "datetime": {"type": ["string", "null"], "format": "date-time"},
+        # String types (default)
+        "string": {"type": ["string", "null"]},
+        "text": {"type": ["string", "null"]},
+        "textarea": {"type": ["string", "null"]},
+        "url": {"type": ["string", "null"]},
+        "email": {"type": ["string", "null"]},
+        "phone": {"type": ["string", "null"]},
+        "reference": {"type": ["string", "null"]},
+    }
+
     def __init__(self, config: Mapping[str, Any]):
         super().__init__(config, self.name)
+        self._describe_cache = None  # Cache for describe API response
+
+    def _get_describe_response(self) -> List[Mapping[str, Any]]:
+        """
+        Fetch and cache the leads/describe API response.
+        Returns list of field descriptors from Marketo.
+        """
+        if self._describe_cache is None:
+            try:
+                resp = self._session.get(
+                    f"{self._url_base}rest/v1/leads/describe.json",
+                    headers=self._session.auth.get_auth_header()
+                )
+                resp.raise_for_status()
+                self._describe_cache = resp.json().get("result", [])
+                self.logger.info(f"Fetched {len(self._describe_cache)} fields from Marketo leads/describe API")
+            except Exception as e:
+                self.logger.error(f"Error fetching leads/describe: {e}")
+                self._describe_cache = []
+        return self._describe_cache
+
+    def _get_field_schema(self, data_type: str) -> Mapping[str, Any]:
+        """
+        Convert Marketo dataType to JSON Schema type definition.
+        """
+        # Return mapped type or default to string
+        return self.MARKETO_TYPE_MAPPING.get(
+            data_type.lower() if data_type else "string",
+            {"type": ["string", "null"]}
+        ).copy()
 
     @property
-    def stream_fields(self):
-        standard_properties = set(self.get_json_schema()["properties"])
-        resp = self._session.get(f"{self._url_base}rest/v1/leads/describe.json", headers=self._session.auth.get_auth_header())
+    def stream_fields(self) -> List[str]:
+        """
+        Return ALL available field names from Marketo (not just intersection with static schema).
+        This ensures custom fields are included in the Bulk Export request.
+        """
+        describe_result = self._get_describe_response()
 
-        available_fields = set()
-        result = resp.json().get("result", [])
-        for describe_record in result:
+        available_fields = []
+        for describe_record in describe_result:
             rest = describe_record.get("rest")
             if rest and "name" in rest:
-                available_fields.add(rest["name"])
-            else:
-                continue  # skipping soap only fields
+                available_fields.append(rest["name"])
+            # Skip SOAP-only fields (no REST API name)
 
         if not available_fields:
-            self.logger.warning("No valid fields found in leads/describe response")
+            self.logger.warning("No valid fields found in leads/describe response, falling back to static schema")
+            # Fallback to static schema fields
+            return list(super().get_json_schema().get("properties", {}).keys())
 
-        return list(standard_properties & available_fields)
+        self.logger.info(f"Requesting {len(available_fields)} fields from Marketo Bulk Export API")
+        return available_fields
 
     def get_json_schema(self) -> Mapping[str, Any]:
-        # TODO: make schema truly dynamic like in stream Activities
-        #  now blocked by https://github.com/airbytehq/airbyte/issues/30530 due to potentially > 500 fields in schema (can cause OOM)
-        return super().get_json_schema()
+        """
+        Build dynamic JSON schema from Marketo leads/describe API.
+        Includes all standard and custom fields with proper type mappings.
+        """
+        # Start with static schema as base (preserves descriptions and any manual overrides)
+        try:
+            base_schema = super().get_json_schema()
+            properties = base_schema.get("properties", {}).copy()
+        except Exception as e:
+            self.logger.warning(f"Could not load base schema: {e}, starting fresh")
+            properties = {}
+
+        # Fetch all fields from Marketo Describe API
+        describe_result = self._get_describe_response()
+
+        fields_added = 0
+        fields_updated = 0
+
+        for field in describe_result:
+            rest = field.get("rest")
+            if not rest or "name" not in rest:
+                continue  # Skip SOAP-only fields
+
+            field_name = rest["name"]
+            data_type = field.get("dataType", "string")
+            display_name = field.get("displayName", field_name)
+
+            # Build field schema with proper type
+            field_schema = self._get_field_schema(data_type)
+
+            # Add description from Marketo if not already present
+            if field_name not in properties:
+                field_schema["description"] = f"{display_name} (Marketo type: {data_type})"
+                properties[field_name] = field_schema
+                fields_added += 1
+            else:
+                # Field exists in static schema - optionally update type if needed
+                # Keeping existing definition to preserve any manual customizations
+                fields_updated += 1
+
+        self.logger.info(
+            f"Dynamic schema built: {fields_added} fields added from Marketo, "
+            f"{fields_updated} fields already in static schema, "
+            f"{len(properties)} total fields"
+        )
+
+        return {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": ["object", "null"],
+            "additionalProperties": True,  # Accept any additional fields not in schema
+            "properties": properties
+        }
 
 
 class Activities(MarketoExportBase):
