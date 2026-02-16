@@ -1,0 +1,14 @@
+{
+  "host": "yourserver.sql.azuresynapse.net",
+  "port": 1433,
+  "database": "yourdatabase",
+  "schema": "dbo",
+  "user": "youruser@yourserver",
+  "password": "yourpassword",
+  "ssl_method": {
+    "name": "encrypted_trust_server_certificate"
+  },
+  "load_type": {
+    "load_type": "INSERT"
+  }
+}

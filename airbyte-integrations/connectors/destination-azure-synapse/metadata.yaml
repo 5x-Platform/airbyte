@@ -1,0 +1,53 @@
+data:
+  ab_internal:
+    ql: 100
+    sl: 100
+    requireVersionIncrementsInPullRequests: false
+  connectorBuildOptions:
+    baseImage: docker.io/airbyte/java-connector-base:2.0.1@sha256:ec89bd1a89e825514dd2fc8730ba299a3ae1544580a078df0e35c5202c2085b3
+  connectorSubtype: database
+  connectorTestSuitesOptions:
+    - suite: unitTests
+    - suite: integrationTests
+      testSecrets:
+        - fileName: bulk_upload_config.json
+          name: SECRET_DESTINATION_AZURE_SYNAPSE_BULK_LOAD_CONFIG
+          secretStore:
+            alias: airbyte-connector-testing-secret-store
+            type: GSM
+  connectorType: destination
+  definitionId: a1b2c3d4-5678-9abc-def0-123456789abc
+  dockerImageTag: 0.1.0
+  dockerRepository: airbyte/destination-azure-synapse
+  documentationUrl: https://docs.airbyte.com/integrations/destinations/azure-synapse
+  githubIssueLabel: destination-azure-synapse
+  icon: icon.svg
+  license: ELv2
+  name: Azure Synapse Analytics
+  registryOverrides:
+    cloud:
+      enabled: true
+    oss:
+      enabled: true
+  releaseStage: alpha
+  supportLevel: community
+  supportsRefreshes: true
+  tags:
+    - language:java
+  externalDocumentationUrls:
+    - title: Azure Synapse Analytics documentation
+      url: https://learn.microsoft.com/en-us/azure/synapse-analytics/
+      type: api_reference
+    - title: Azure Synapse dedicated SQL pool
+      url: https://learn.microsoft.com/en-us/azure/synapse-analytics/sql-data-warehouse/
+      type: api_reference
+    - title: COPY INTO (Transact-SQL) for Azure Synapse
+      url: https://learn.microsoft.com/en-us/sql/t-sql/statements/copy-into-transact-sql
+      type: sql_reference
+    - title: Connection strings for Synapse SQL
+      url: https://learn.microsoft.com/en-us/azure/synapse-analytics/sql/connection-strings
+      type: authentication_guide
+    - title: Table data types in Synapse SQL
+      url: https://learn.microsoft.com/en-us/azure/synapse-analytics/sql/develop-tables-data-types
+      type: api_reference
+metadataSpecVersion: "1.0"

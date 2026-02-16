@@ -19,6 +19,7 @@ import io.airbyte.cdk.load.state.ReservationManager
 import io.airbyte.cdk.load.state.Reserved
 import io.airbyte.cdk.load.state.StreamManager
 import io.airbyte.cdk.load.state.SyncManager
+import io.airbyte.cdk.load.message.DestinationRecordRaw
 import io.airbyte.cdk.load.util.deserializeToNode
 import io.mockk.*
 import java.util.UUID
@@ -40,6 +41,8 @@ class PipelineEventBookkeepingRouterTest {
     private val openStreamQueue = mockk<QueueWriter<DestinationStream>>(relaxed = true)
     private val fileTransferQueue = mockk<MessageQueue<FileTransferQueueMessage>>(relaxed = true)
     private val batchStateUpdateQueue = mockk<ChannelMessageQueue<BatchUpdate>>(relaxed = true)
+    private val pipelineInputQueue =
+        mockk<PartitionedQueue<PipelineEvent<StreamKey, DestinationRecordRaw>>>(relaxed = true)
 
     private val namespaceMapper = NamespaceMapper(NamespaceDefinitionType.SOURCE)
 
@@ -77,6 +80,7 @@ class PipelineEventBookkeepingRouterTest {
             numDataChannels = numDataChannels,
             markEndOfStreamAtEndOfSync = markEndOfStreamAtEnd,
             namespaceMapper = namespaceMapper,
+            pipelineInputQueue = pipelineInputQueue,
         )
 
     @BeforeEach
