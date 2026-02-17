@@ -1,0 +1,77 @@
+{
+  "type": "object",
+  "title": "Azure OneLake Destination Specification",
+  "description": "Configuration for Azure OneLake destination using Apache Iceberg format. Data is written to a Microsoft Fabric Lakehouse via the OneLake ADLS Gen2 DFS API.",
+  "properties": {
+    "tenant_id": {
+      "type": "string",
+      "title": "Tenant ID",
+      "description": "The Azure Active Directory (Entra ID) Tenant ID. Found in Azure Portal > Microsoft Entra ID > Overview > Directory (tenant) ID.",
+      "order": 0,
+      "always_show": true,
+      "examples": ["12345678-abcd-1234-abcd-123456789012"]
+    },
+    "client_id": {
+      "type": "string",
+      "title": "Client ID",
+      "description": "The Application (Client) ID of the Azure AD service principal. Found in Azure Portal > App registrations > Your App > Overview > Application (client) ID.",
+      "order": 1,
+      "always_show": true,
+      "examples": ["abcdef12-3456-7890-abcd-ef1234567890"]
+    },
+    "client_secret": {
+      "type": "string",
+      "title": "Client Secret",
+      "description": "The client secret for the Azure AD service principal. Found in Azure Portal > App registrations > Your App > Certificates & secrets.",
+      "order": 2,
+      "always_show": true,
+      "airbyte_secret": true
+    },
+    "workspace_guid": {
+      "type": "string",
+      "title": "Workspace GUID",
+      "description": "The GUID of the Microsoft Fabric workspace containing the Lakehouse.",
+      "order": 3,
+      "always_show": true,
+      "examples": ["aaaabbbb-cccc-dddd-eeee-ffffgggghhhh"]
+    },
+    "lakehouse_guid": {
+      "type": "string",
+      "title": "Lakehouse GUID",
+      "description": "The GUID of the Lakehouse within the workspace.",
+      "order": 4,
+      "always_show": true,
+      "examples": ["11112222-3333-4444-5555-666677778888"]
+    },
+    "lakehouse_name": {
+      "type": "string",
+      "title": "Lakehouse Name",
+      "description": "The name of the Lakehouse.",
+      "order": 5,
+      "always_show": true,
+      "examples": ["my_lakehouse"]
+    },
+    "main_branch_name": {
+      "type": "string",
+      "title": "Main Branch Name",
+      "default": "main",
+      "order": 6
+    },
+    "namespace": {
+      "type": "string",
+      "title": "Default Namespace",
+      "default": "default",
+      "order": 7,
+      "examples": ["default", "dbo"]
+    },
+    "catalog_type": {
+      "title": "Catalog Type",
+      "order": 8,
+      "always_show": true,
+      "oneOf": [
+        { "$ref": "#/definitions/OneLakeRestCatalogSpec" },
+        { "$ref": "#/definitions/PolarisCatalogSpec" }
+      ]
+    }
+  }
+}

@@ -1,0 +1,8 @@
+[tool.poe.tasks.build]
+cmd = "./gradlew :airbyte-integrations:connectors:destination-azure-onelake:build"
+
+[tool.poe.tasks.test]
+cmd = "./gradlew :airbyte-integrations:connectors:destination-azure-onelake:test"
+
+[tool.poe.tasks.integrationTest]
+cmd = "./gradlew :airbyte-integrations:connectors:destination-azure-onelake:integrationTest"
