@@ -15,7 +15,6 @@ import io.airbyte.cdk.load.write.StreamLoader
 import io.airbyte.cdk.load.write.StreamStateStore
 import io.airbyte.integrations.destination.azure_onelake.catalog.AzureOneLakeCatalogUtil
 import io.airbyte.integrations.destination.azure_onelake.spec.AzureOneLakeConfiguration
-import io.airbyte.integrations.destination.azure_onelake.spec.DEFAULT_STAGING_BRANCH
 import javax.inject.Singleton
 import org.apache.iceberg.catalog.TableIdentifier
 
@@ -69,8 +68,7 @@ class AzureOneLakeWriter(
             icebergTableSynchronizer,
             catalogUtil,
             icebergUtil,
-            stagingBranchName = DEFAULT_STAGING_BRANCH,
-            mainBranchName = config.mainBranchName,
+            tableIdGenerator,
             streamStateStore = streamStateStore,
         )
     }

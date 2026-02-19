@@ -668,6 +668,35 @@ internal class SnowflakeDirectLoadSqlGeneratorTest {
         assert(!sql.contains("THEN DELETE"))
         assert(sql.contains("WHEN NOT MATCHED THEN INSERT"))
         assert(!sql.contains("AND new_record.${CDC_DELETED_AT_COLUMN.quote()} IS NULL"))
+
+        // Data columns (ID, NAME) should use CASE WHEN to preserve existing data on delete
+        assert(sql.contains("""CASE WHEN new_record."_AB_CDC_DELETED_AT" IS NOT NULL THEN target_table."ID" ELSE new_record."ID" END""")) {
+            "Expected ID column to use CASE WHEN for preserving data on delete, but got:\n$sql"
+        }
+        assert(sql.contains("""CASE WHEN new_record."_AB_CDC_DELETED_AT" IS NOT NULL THEN target_table."NAME" ELSE new_record."NAME" END""")) {
+            "Expected NAME column to use CASE WHEN for preserving data on delete, but got:\n$sql"
+        }
+
+        // CDC metadata columns should always be updated directly (no CASE WHEN)
+        assert(sql.contains(""""_AB_CDC_DELETED_AT" = new_record."_AB_CDC_DELETED_AT"""")) {
+            "Expected _AB_CDC_DELETED_AT to be updated directly, but got:\n$sql"
+        }
+
+        // Dedup query should carry forward data from non-delete rows to delete rows
+        // by joining with best_non_delete CTE
+        assert(sql.contains("best_non_delete")) {
+            "Expected dedup query to include best_non_delete CTE for carrying forward data columns, but got:\n$sql"
+        }
+        assert(sql.contains("non_delete_numbered")) {
+            "Expected dedup query to include non_delete_numbered CTE, but got:\n$sql"
+        }
+        assert(sql.contains("LEFT JOIN best_non_delete nd")) {
+            "Expected dedup query to LEFT JOIN best_non_delete for data carry-forward, but got:\n$sql"
+        }
+        // Data columns in dedup SELECT should use CASE WHEN to pick from non-delete when available
+        assert(sql.contains("""CASE WHEN d."_AB_CDC_DELETED_AT" IS NOT NULL AND nd."ID" IS NOT NULL THEN nd."ID" ELSE d."ID" END AS "ID"""")) {
+            "Expected dedup SELECT to carry forward ID from non-delete rows, but got:\n$sql"
+        }
     }
 
     @Test

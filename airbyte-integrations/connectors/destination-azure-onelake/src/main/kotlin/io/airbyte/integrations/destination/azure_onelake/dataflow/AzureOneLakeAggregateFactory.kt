@@ -11,7 +11,6 @@ import io.airbyte.cdk.load.dataflow.aggregate.StoreKey
 import io.airbyte.cdk.load.toolkits.iceberg.parquet.io.IcebergTableWriterFactory
 import io.airbyte.cdk.load.toolkits.iceberg.parquet.io.IcebergUtil
 import io.airbyte.cdk.load.write.StreamStateStore
-import io.airbyte.integrations.destination.azure_onelake.spec.DEFAULT_STAGING_BRANCH
 import io.airbyte.integrations.destination.azure_onelake.write.AzureOneLakeStreamState
 import jakarta.inject.Singleton
 
@@ -39,9 +38,9 @@ class AzureOneLakeAggregateFactory(
             stream = stream,
             table = state.table,
             schema = state.schema,
-            stagingBranchName = DEFAULT_STAGING_BRANCH,
             writer = writer,
             icebergUtil = icebergUtil,
+            pkFieldsConvertedToLong = state.pkFieldsConvertedToLong,
         )
     }
 }

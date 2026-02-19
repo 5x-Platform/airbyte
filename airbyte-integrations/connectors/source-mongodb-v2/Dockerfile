@@ -1,4 +1,4 @@
-FROM airbyte/source-mongodb-v2:2.0.7
+FROM airbyte/source-mongodb-v2:dev
 USER root
 
 COPY certs/ /tmp/certs/

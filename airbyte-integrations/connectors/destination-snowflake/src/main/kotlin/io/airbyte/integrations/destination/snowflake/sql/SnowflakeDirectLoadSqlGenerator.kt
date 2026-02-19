@@ -154,8 +154,16 @@ class SnowflakeDirectLoadSqlGenerator(
         val newRecordColumnList: String =
             allColumns.joinToString(",\n  ") { "new_record.${it.quote()}" }
 
+        // Determine if this is a CDC stream with soft delete (i.e., _ab_cdc_deleted_at exists
+        // but we're not in hard delete mode). For soft deletes, we preserve existing data
+        // columns when processing a delete event, so that only metadata columns are updated
+        // and the original document data is not lost.
+        val isCdcSoftDelete =
+            finalSchema.containsKey(SNOWFLAKE_AB_CDC_DELETED_AT_COLUMN) &&
+                config.cdcDeletionMode != CdcDeletionMode.HARD_DELETE
+
         // Get deduped records from source
-        val selectSourceRecords = selectDedupedRecords(tableSchema, sourceTableName)
+        val selectSourceRecords = selectDedupedRecords(tableSchema, sourceTableName, isCdcSoftDelete)
 
         // Build cursor comparison for determining which record is newer
         val cursorComparison: String
@@ -179,9 +187,27 @@ class SnowflakeDirectLoadSqlGenerator(
         }
 
         // Build column assignments for UPDATE
+
+        // Airbyte internal columns that are always updated regardless of delete status
+        val airbyteMetaColumns = setOf(
+            SNOWFLAKE_AB_RAW_ID,
+            SNOWFLAKE_AB_EXTRACTED_AT,
+            SNOWFLAKE_AB_META,
+            SNOWFLAKE_AB_GENERATION_ID,
+        )
+
         val columnAssignments: String =
             allColumns.joinToString(",\n  ") { column ->
-                "${column.quote()} = new_record.${column.quote()}"
+                // For CDC soft delete: preserve data columns when processing a delete event.
+                // CDC metadata columns (like _AB_CDC_DELETED_AT, _AB_CDC_UPDATED_AT, _AB_CDC_CURSOR)
+                // and Airbyte internal columns are always updated. User data columns (like _ID, DATA)
+                // are preserved from the existing row so the original document is not lost.
+                val isCdcMetaColumn = column.uppercase().startsWith("_AB_CDC")
+                if (isCdcSoftDelete && column !in airbyteMetaColumns && !isCdcMetaColumn) {
+                    "${column.quote()} = CASE WHEN new_record.\"${SNOWFLAKE_AB_CDC_DELETED_AT_COLUMN}\" IS NOT NULL THEN target_table.${column.quote()} ELSE new_record.${column.quote()} END"
+                } else {
+                    "${column.quote()} = new_record.${column.quote()}"
+                }
             }
 
         // Handle CDC deletions based on mode
@@ -244,17 +270,26 @@ class SnowflakeDirectLoadSqlGenerator(
     /**
      * Generates a SQL SELECT statement that extracts and deduplicates records from the source
      * table. Uses ROW_NUMBER() window function to select the most recent record per primary key.
+     *
+     * For CDC soft delete mode: when the winning (latest) row per primary key is a delete event,
+     * data columns are carried forward from the latest non-delete row in the same batch.
+     * This handles the case where an insert/update and delete happen in the same CDC window —
+     * the delete row would otherwise only contain the document _id, losing the full document data.
+     * By carrying forward data columns, the final table preserves the document content even
+     * when marked as deleted.
      */
     private fun selectDedupedRecords(
         tableSchema: StreamTableSchema,
-        sourceTableName: TableName
+        sourceTableName: TableName,
+        isCdcSoftDelete: Boolean = false
     ): String {
+        val finalSchema = tableSchema.columnSchema.finalSchema
         val allColumns = buildList {
             add(SNOWFLAKE_AB_RAW_ID)
             add(SNOWFLAKE_AB_EXTRACTED_AT)
             add(SNOWFLAKE_AB_META)
             add(SNOWFLAKE_AB_GENERATION_ID)
-            addAll(tableSchema.columnSchema.finalSchema.keys)
+            addAll(finalSchema.keys)
         }
         val columnList: String = allColumns.joinToString(",\n      ") { it.quote() }
 
@@ -277,6 +312,56 @@ class SnowflakeDirectLoadSqlGenerator(
                 ""
             }
 
+        val windowOrderClause = "$cursorOrderClause \"$SNOWFLAKE_AB_EXTRACTED_AT\" DESC"
+
+        if (!isCdcSoftDelete) {
+            return """
+                |  WITH records AS (
+                |    SELECT
+                |      $columnList
+                |    FROM ${fullyQualifiedName(sourceTableName)}
+                |  ), numbered_rows AS (
+                |    SELECT *, ROW_NUMBER() OVER (
+                |      PARTITION BY $pkList ORDER BY $windowOrderClause
+                |    ) AS row_number
+                |    FROM records
+                |  )
+                |  SELECT $columnList
+                |  FROM numbered_rows
+                |  WHERE row_number = 1
+            """
+                .trimMargin()
+                .andLog()
+        }
+
+        // CDC soft delete mode: carry forward data columns from non-delete rows to delete rows.
+        // When insert+delete or update+delete happen in the same CDC batch, the dedup picks the
+        // latest row (the delete), which only contains the _id. We use a subquery to find the
+        // latest non-delete row's data columns per PK and COALESCE them into the delete row.
+        val airbyteMetaColumns = setOf(
+            SNOWFLAKE_AB_RAW_ID,
+            SNOWFLAKE_AB_EXTRACTED_AT,
+            SNOWFLAKE_AB_META,
+            SNOWFLAKE_AB_GENERATION_ID,
+        )
+
+        // Identify data columns (not Airbyte internal, not CDC metadata)
+        val dataColumns = allColumns.filter { column ->
+            val isCdcMetaColumn = column.uppercase().startsWith("_AB_CDC")
+            column !in airbyteMetaColumns && !isCdcMetaColumn
+        }
+
+        // For the final SELECT: when the winning row is a delete, COALESCE with the latest
+        // non-delete row's data from the same batch. This is done by joining the deduped
+        // result with a "best non-delete data" CTE.
+        val finalColumnList = allColumns.joinToString(",\n      ") { column ->
+            if (column in dataColumns) {
+                "CASE WHEN d.\"${SNOWFLAKE_AB_CDC_DELETED_AT_COLUMN}\" IS NOT NULL AND nd.${column.quote()} IS NOT NULL THEN nd.${column.quote()} ELSE d.${column.quote()} END AS ${column.quote()}"
+            } else {
+                "d.${column.quote()}"
+            }
+        }
+
         return """
             |  WITH records AS (
             |    SELECT
@@ -284,13 +369,27 @@ class SnowflakeDirectLoadSqlGenerator(
             |    FROM ${fullyQualifiedName(sourceTableName)}
             |  ), numbered_rows AS (
             |    SELECT *, ROW_NUMBER() OVER (
-            |      PARTITION BY $pkList ORDER BY $cursorOrderClause "$SNOWFLAKE_AB_EXTRACTED_AT" DESC
+            |      PARTITION BY $pkList ORDER BY $windowOrderClause
             |    ) AS row_number
             |    FROM records
+            |  ), deduped AS (
+            |    SELECT $columnList
+            |    FROM numbered_rows
+            |    WHERE row_number = 1
+            |  ), non_delete_numbered AS (
+            |    SELECT *, ROW_NUMBER() OVER (
+            |      PARTITION BY $pkList ORDER BY $windowOrderClause
+            |    ) AS row_number
+            |    FROM records
+            |    WHERE "${SNOWFLAKE_AB_CDC_DELETED_AT_COLUMN}" IS NULL
+            |  ), best_non_delete AS (
+            |    SELECT $columnList
+            |    FROM non_delete_numbered
+            |    WHERE row_number = 1
             |  )
-            |  SELECT $columnList
-            |  FROM numbered_rows
-            |  WHERE row_number = 1
+            |  SELECT $finalColumnList
+            |  FROM deduped d
+            |  LEFT JOIN best_non_delete nd ON ${pks.joinToString(" AND ") { "d.${it.quote()} = nd.${it.quote()}" }}
         """
             .trimMargin()
             .andLog()
