@@ -8,11 +8,20 @@ import io.airbyte.cdk.load.command.DestinationStream
 import io.airbyte.cdk.load.data.AirbyteValue
 import io.airbyte.cdk.load.data.IntegerValue
 import io.airbyte.cdk.load.data.NumberValue
+import io.airbyte.cdk.load.data.ObjectValue
+import io.airbyte.cdk.load.data.StringValue
+import io.airbyte.cdk.load.data.TimestampWithTimezoneValue
+import io.airbyte.cdk.load.data.TimestampWithoutTimezoneValue
 import io.airbyte.cdk.load.dataflow.aggregate.Aggregate
 import io.airbyte.cdk.load.dataflow.transform.RecordDTO
+import io.airbyte.cdk.load.message.Meta
+import io.airbyte.cdk.load.util.serializeToString
 import io.airbyte.cdk.load.toolkits.iceberg.parquet.io.IcebergUtil
 import io.airbyte.cdk.load.toolkits.iceberg.parquet.io.RecordWrapper
 import io.github.oshai.kotlinlogging.KotlinLogging
+import java.time.Instant
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.apache.iceberg.Schema
@@ -46,20 +55,38 @@ class AzureOneLakeAggregate(
     private val pkFieldsConvertedToLong: Set<String> = emptySet(),
 ) : Aggregate {
     override fun accept(record: RecordDTO) {
-        // Fix NumberValue → IntegerValue for PK fields that were changed from Double to Long.
-        // The CDK's AirbyteValueToIcebergRecord.convert() always maps NumberValue → Double,
-        // but our schema has these PK fields as LongType (because Iceberg forbids Double as
-        // identifier fields). Converting to IntegerValue makes the CDK return Long instead.
-        val fields: Map<String, AirbyteValue> = if (pkFieldsConvertedToLong.isNotEmpty()) {
-            record.fields.entries.associate { (name, value) ->
-                if (name in pkFieldsConvertedToLong && value is NumberValue) {
+        // Apply value conversions for Fabric compatibility.
+        // The Iceberg schema was modified in StreamLoader to use TimestampType.withZone()
+        // for all timestamp columns and _airbyte_extracted_at, so the values must match.
+        val fields: Map<String, AirbyteValue> = record.fields.entries.associate { (name, value) ->
+            when {
+                // PK fields: NumberValue → IntegerValue (Double → Long for identifier fields)
+                name in pkFieldsConvertedToLong && value is NumberValue ->
                     name to IntegerValue(value.value.toBigInteger())
-                } else {
-                    name to value
-                }
+
+                // _airbyte_extracted_at: IntegerValue(epochMs) → TimestampWithTimezoneValue
+                // Schema was changed from LongType to TimestampType.withZone() for Fabric.
+                name == Meta.COLUMN_NAME_AB_EXTRACTED_AT && value is IntegerValue ->
+                    name to TimestampWithTimezoneValue(
+                        OffsetDateTime.ofInstant(
+                            Instant.ofEpochMilli(value.value.toLong()),
+                            ZoneOffset.UTC
+                        )
+                    )
+
+                // _airbyte_meta: ObjectValue → StringValue (JSON)
+                // Schema was changed from StructType to StringType for Fabric.
+                name == Meta.COLUMN_NAME_AB_META && value is ObjectValue ->
+                    name to StringValue(value.serializeToString())
+
+                // Timestamp-without-timezone → Timestamp-with-timezone
+                // Schema was changed from TimestampType.withoutZone() to .withZone() for Fabric.
+                // Add UTC offset since NTZ values have no inherent timezone.
+                value is TimestampWithoutTimezoneValue ->
+                    name to TimestampWithTimezoneValue(value.value.atOffset(ZoneOffset.UTC))
+
+                else -> name to value
             }
-        } else {
-            record.fields
         }
 
         val wrappedRecord =

@@ -92,7 +92,7 @@ class AzureOneLakeStreamLoader(
 
         pkFieldsConvertedToLong = pkFieldsNeedingFix
 
-        if (pkFieldsNeedingFix.isNotEmpty()) {
+        val pkFixedSchema = if (pkFieldsNeedingFix.isNotEmpty()) {
             logger.info {
                 "Fixing PK field types for Dedupe mode. Fields needing Long conversion: $pkFieldsNeedingFix"
             }
@@ -111,10 +111,22 @@ class AzureOneLakeStreamLoader(
                     field
                 }
             }
-            incomingSchema = Schema(newFields, identifierFieldIds)
+            Schema(newFields, identifierFieldIds)
         } else {
-            incomingSchema = baseSchema
+            baseSchema
         }
+
+        // FABRIC COMPATIBILITY: Convert timestamp and extracted_at types.
+        // Fabric's XTable auto-virtualization (Iceberg → Delta) silently drops columns
+        // with Iceberg TimestampType.withoutZone() (Parquet isAdjustedToUTC=false).
+        // DATE columns work fine, but timestamp-without-zone columns are invisible in
+        // Fabric's SQL endpoint. Fix: use TimestampType.withZone() (isAdjustedToUTC=true)
+        // for all timestamp columns — Fabric maps these to datetime2.
+        //
+        // Also, _airbyte_extracted_at is defined as IntegerType (LongType in Iceberg) in the CDK,
+        // storing epoch milliseconds. Convert to TimestampType.withZone() so Fabric shows it
+        // as a proper datetime2 instead of a raw bigint.
+        incomingSchema = convertTimestampsForFabric(pkFixedSchema)
     }
 
     @SuppressFBWarnings(
@@ -327,4 +339,50 @@ class AzureOneLakeStreamLoader(
             incomingSchema,
             columnTypeChangeBehavior,
         )
+
+    companion object {
+        /**
+         * Convert Iceberg schema for Fabric compatibility:
+         * 1. TimestampType.withoutZone() → TimestampType.withZone()
+         *    (Fabric XTable drops columns with isAdjustedToUTC=false)
+         * 2. _airbyte_extracted_at LongType → TimestampType.withZone()
+         *    (show as datetime2 instead of bigint epoch ms)
+         */
+        fun convertTimestampsForFabric(schema: Schema): Schema {
+            val identifierFieldIds = schema.identifierFieldIds()
+            val newFields = schema.columns().map { field ->
+                when {
+                    // Convert _airbyte_extracted_at from LongType to timestamptz
+                    field.name() == Meta.COLUMN_NAME_AB_EXTRACTED_AT && field.type() is Types.LongType -> {
+                        logger.info { "Converting _airbyte_extracted_at from LongType to TimestampType.withZone() for Fabric" }
+                        Types.NestedField.of(
+                            field.fieldId(), field.isOptional, field.name(),
+                            Types.TimestampType.withZone(), field.doc()
+                        )
+                    }
+                    // Convert _airbyte_meta from StructType to StringType
+                    // Fabric XTable silently drops Iceberg struct columns during virtualization.
+                    // Store as JSON string so it's visible in Fabric's SQL endpoint.
+                    field.name() == Meta.COLUMN_NAME_AB_META && field.type().isStructType -> {
+                        logger.info { "Converting _airbyte_meta from StructType to StringType for Fabric" }
+                        Types.NestedField.of(
+                            field.fieldId(), field.isOptional, field.name(),
+                            Types.StringType.get(), field.doc()
+                        )
+                    }
+                    // Convert timestamp-without-zone to timestamp-with-zone
+                    field.type() is Types.TimestampType &&
+                        !(field.type() as Types.TimestampType).shouldAdjustToUTC() -> {
+                        logger.info { "Converting ${field.name()} from TimestampType.withoutZone() to .withZone() for Fabric" }
+                        Types.NestedField.of(
+                            field.fieldId(), field.isOptional, field.name(),
+                            Types.TimestampType.withZone(), field.doc()
+                        )
+                    }
+                    else -> field
+                }
+            }
+            return Schema(newFields, identifierFieldIds)
+        }
+    }
 }

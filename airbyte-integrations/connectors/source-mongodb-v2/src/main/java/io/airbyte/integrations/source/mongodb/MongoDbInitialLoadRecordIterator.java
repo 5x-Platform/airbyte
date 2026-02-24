@@ -80,7 +80,7 @@ public class MongoDbInitialLoadRecordIterator extends AbstractIterator<Document>
         && Duration.between(startInstant, Instant.now()).compareTo(cdcInitialLoadTimeout.get()) > 0) {
       final String cdcInitialLoadTimeoutMessage = String.format(
           "Initial load for table %s has taken longer than %s, Canceling sync so that CDC replication can catch-up on subsequent attempt, and then initial snapshotting will resume",
-          getAirbyteStream().get(), cdcInitialLoadTimeout.get());
+          getAirbyteStream().map(Object::toString).orElse("unknown"), cdcInitialLoadTimeout.get());
       LOGGER.info(cdcInitialLoadTimeoutMessage);
       AirbyteTraceMessageUtility.emitAnalyticsTrace(cdcSnapshotForceShutdownMessage());
       throw new TransientErrorException(cdcInitialLoadTimeoutMessage);
@@ -133,16 +133,22 @@ public class MongoDbInitialLoadRecordIterator extends AbstractIterator<Document>
 
   private MongoCursor<Document> buildNewQueryIterator() {
     Bson filter = buildFilter();
+    // Set batchSize to reduce driver-server round-trips. Default batch size is small,
+    // causing many getMore commands for large chunks. Using min(chunkSize, 50000) to
+    // balance memory usage and round-trip reduction.
+    final int cursorBatchSize = Math.min(chunkSize, 50000);
     return isEnforceSchema ? collection.find()
         .filter(filter)
         .projection(fields)
         .limit(chunkSize)
+        .batchSize(cursorBatchSize)
         .sort(Sorts.ascending(MongoConstants.ID_FIELD))
         .allowDiskUse(true)
         .cursor()
         : collection.find()
             .filter(filter)
             .limit(chunkSize)
+            .batchSize(cursorBatchSize)
             .sort(Sorts.ascending(MongoConstants.ID_FIELD))
             .allowDiskUse(true)
             .cursor();

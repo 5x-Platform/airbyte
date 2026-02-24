@@ -43,6 +43,10 @@ dependencies {
     implementation 'io.debezium:debezium-embedded:2.6.2.Final'
     implementation 'io.debezium:debezium-connector-mongodb:2.6.2.Final'
 
+    // MongoDB wire protocol compression for faster initial snapshot I/O
+    implementation 'com.github.luben:zstd-jni:1.5.5-11'
+    implementation 'org.xerial.snappy:snappy-java:1.1.10.5'
+
     testImplementation 'org.testcontainers:mongodb:1.19.0'
 
     dataGeneratorImplementation project(':airbyte-integrations:connectors:source-mongodb-v2')

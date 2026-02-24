@@ -208,8 +208,16 @@
         "description": "The amount of time an initial load is allowed to continue for before catching up on CDC logs.",
         "default": 8,
         "min": 4,
-        "max": 24,
+        "max": 720,
         "order": 14,
+        "group": "advanced"
+      },
+      "skip_collection_stats": {
+        "type": "boolean",
+        "title": "Skip Collection Statistics (Advanced)",
+        "description": "When enabled, skips the collection statistics and _id type validation during initial snapshot. This avoids expensive aggregation queries ($collStats and $group) on very large collections (100GB+) that can take over an hour to complete. Uses a default chunk size of 1,000,000 documents instead. Enable this for connections with very large collections that timeout during initial load.",
+        "default": false,
+        "order": 15,
         "group": "advanced"
       }
     },

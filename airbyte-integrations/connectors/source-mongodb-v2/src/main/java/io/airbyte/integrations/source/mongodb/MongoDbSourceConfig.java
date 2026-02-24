@@ -117,6 +117,10 @@ public record MongoDbSourceConfig(JsonNode rawConfig) {
     }
   }
 
+  public boolean getSkipCollectionStats() {
+    return rawConfig.has("skip_collection_stats") && rawConfig.get("skip_collection_stats").asBoolean(false);
+  }
+
   private void addAdvancedPropertiesToDatabaseConfig(JsonNode dbConfig) {
     ((ObjectNode) dbConfig).put(UPDATE_CAPTURE_MODE, getUpdateCaptureMode());
   }
