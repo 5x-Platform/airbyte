@@ -1,0 +1,12 @@
+# Azure Synapse Analytics does not have a local Docker container.
+# For local development and testing, you can use a SQL Server container
+# as a development proxy (note: COPY INTO will not work locally).
+version: "3.7"
+services:
+  sql-server:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    ports:
+      - "1433:1433"
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=A_Str0ng_Required_Password

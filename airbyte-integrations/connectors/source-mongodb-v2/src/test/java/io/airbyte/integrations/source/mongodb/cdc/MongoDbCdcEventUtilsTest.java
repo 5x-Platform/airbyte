@@ -66,6 +66,32 @@ class MongoDbCdcEventUtilsTest {
   }
 
   @Test
+  void testGenerateObjectIdDocumentWithBinaryUuid() {
+    // Simulate a Debezium event key for a Binary UUID _id (subType 04)
+    final String binaryIdJson = "{\"$binary\": {\"base64\": \"sYOnMJJFRnGJhNSiKNsByw==\", \"subType\": \"04\"}}";
+    final JsonNode debeziumEventKey = Jsons.jsonNode(Map.of(ID_FIELD, binaryIdJson));
+
+    final String result = MongoDbCdcEventUtils.generateObjectIdDocument(debeziumEventKey);
+
+    // The result should preserve the $binary as a JSON object, not a string,
+    // so that Document.parse() correctly interprets it as BsonBinary
+    assertTrue(result.contains(DOCUMENT_OBJECT_ID_FIELD));
+    assertTrue(result.contains("$binary"));
+    // Verify it's valid JSON that Document.parse() can handle
+    final org.bson.Document parsed = org.bson.Document.parse(result);
+    assertNotNull(parsed.get(DOCUMENT_OBJECT_ID_FIELD));
+    // The parsed _id should be a Binary type, not a String
+    assertTrue(parsed.get(DOCUMENT_OBJECT_ID_FIELD) instanceof org.bson.types.Binary,
+        "Expected Binary type but got: " + parsed.get(DOCUMENT_OBJECT_ID_FIELD).getClass().getName());
+
+    // Verify end-to-end: when transformDataTypesNoSchema processes this, _id becomes a UUID string
+    final ObjectNode transformed = MongoDbCdcEventUtils.transformDataTypesNoSchema(result);
+    final String idValue = transformed.get(DOCUMENT_OBJECT_ID_FIELD).asText();
+    // sYOnMJJFRnGJhNSiKNsByw== is the base64 of UUID b183a730-9245-4671-8986-d4a228db01cb
+    assertEquals("b183a730-9245-4671-8986-d4a228db01cb", idValue);
+  }
+
+  @Test
   void testNormalizeObjectId() {
     final JsonNode data = MongoDbCdcEventUtils.normalizeObjectId((ObjectNode) Jsons.jsonNode(
         Map.of(DOCUMENT_OBJECT_ID_FIELD, Map.of(OBJECT_ID_FIELD, OBJECT_ID))));
@@ -160,11 +186,11 @@ class MongoDbCdcEventUtilsTest {
     assertTrue(transformed.has("field15"));
     assertEquals(JsonNodeType.NULL, transformed.get("field15").getNodeType());
     assertEquals("value", transformed.get("field16").get("key").asText());
-    // Assert that UUIDs can be serialized. Currently, they will be represented as base 64 encoded
-    // strings. Since the original mongo source
-    // may have these UUIDs written by a variety of sources, each with different encodings - we cannot
-    // decode these back to the original UUID.
+    // UUID_STANDARD (subtype 4) should be converted to standard UUID string format
     assertTrue(transformed.has("field17"));
+    assertEquals(standardUuid.toString(), transformed.get("field17").asText());
+    // UUID_LEGACY (subtype 3) remains as base64 encoded bytes since legacy byte ordering
+    // varies by driver and cannot be reliably decoded to the original UUID
     assertTrue(transformed.has("field18"));
   }
 

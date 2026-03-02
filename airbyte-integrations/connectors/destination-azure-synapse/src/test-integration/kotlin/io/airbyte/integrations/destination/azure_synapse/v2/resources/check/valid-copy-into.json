@@ -1,0 +1,17 @@
+{
+  "host": "yourserver.sql.azuresynapse.net",
+  "port": 1433,
+  "database": "yourdatabase",
+  "schema": "dbo",
+  "user": "youruser@yourserver",
+  "password": "yourpassword",
+  "ssl_method": {
+    "name": "encrypted_trust_server_certificate"
+  },
+  "load_type": {
+    "load_type": "COPY_INTO",
+    "azure_blob_storage_account_name": "yourstorageaccount",
+    "azure_blob_storage_container_name": "yourcontainer",
+    "shared_access_signature": "sv=2021-08-06&st=2025-04-11T00%3A00%3A00Z&se=2025-04-12T00%3A00%3A00Z&sr=b&sp=rw&sig=test"
+  }
+}

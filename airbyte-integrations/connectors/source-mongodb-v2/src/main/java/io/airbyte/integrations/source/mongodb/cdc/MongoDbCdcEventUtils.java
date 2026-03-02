@@ -21,6 +21,7 @@ import io.airbyte.commons.json.Jsons;
 import io.airbyte.commons.util.MoreIterators;
 import io.airbyte.protocol.models.v0.ConfiguredAirbyteStream;
 import java.util.Collections;
+import java.util.UUID;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,6 +45,8 @@ import org.bson.codecs.UuidCodecProvider;
 import org.bson.codecs.ValueCodecProvider;
 import org.bson.codecs.configuration.CodecRegistry;
 import org.bson.codecs.jsr310.Jsr310CodecProvider;
+import org.bson.BsonBinarySubType;
+import org.bson.internal.UuidHelper;
 import org.bson.types.Decimal128;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -79,7 +82,16 @@ public class MongoDbCdcEventUtils {
     if (StringUtils.contains(idField, OBJECT_ID_FIELD)) {
       return idField.replaceAll(OBJECT_ID_FIELD_PATTERN, DOCUMENT_OBJECT_ID_FIELD);
     } else {
-      return Jsons.serialize(Jsons.jsonNode(Map.of(DOCUMENT_OBJECT_ID_FIELD, idField.replaceAll("^\"|\"$", ""))));
+      final String cleanedId = idField.replaceAll("^\"|\"$", "");
+      // If the ID value is a JSON object (e.g. Extended JSON like {"$binary": ...}),
+      // preserve it as a JSON object so that Document.parse() correctly interprets the
+      // BSON type. Otherwise, it would be treated as a string literal and not converted
+      // to the proper type (e.g. BsonBinary), causing format inconsistency between
+      // delete events and insert/update events.
+      if (cleanedId.trim().startsWith("{")) {
+        return "{\"" + DOCUMENT_OBJECT_ID_FIELD + "\": " + cleanedId + "}";
+      }
+      return Jsons.serialize(Jsons.jsonNode(Map.of(DOCUMENT_OBJECT_ID_FIELD, cleanedId)));
     }
   }
 
@@ -296,7 +308,7 @@ public class MongoDbCdcEventUtils {
       case DECIMAL128 -> o.put(fieldName, toDouble(reader.readDecimal128()));
       case TIMESTAMP -> o.put(fieldName, DataTypeUtils.toISO8601StringWithMilliseconds(reader.readTimestamp().getValue()));
       case DATE_TIME -> o.put(fieldName, DataTypeUtils.toISO8601StringWithMilliseconds(reader.readDateTime()));
-      case BINARY -> o.put(fieldName, toByteArray(reader.readBinaryData()));
+      case BINARY -> readBinaryField(o, reader, fieldName);
       case SYMBOL -> o.put(fieldName, reader.readSymbol());
       case STRING -> o.put(fieldName, reader.readString());
       case OBJECT_ID -> o.put(fieldName, toString(reader.readObjectId()));
@@ -343,6 +355,29 @@ public class MongoDbCdcEventUtils {
 
   private static byte[] toByteArray(final BsonBinary value) {
     return value == null ? null : value.getData();
+  }
+
+  /**
+   * Reads a BSON Binary field and writes it to the output node. UUID binary subtype 4 (standard)
+   * is converted to standard UUID string format (e.g. "b183a730-9245-4671-8986-d4a228db01cb") to
+   * avoid requiring downstream consumers to decode base64. All other binary subtypes (including
+   * legacy UUID subtype 3) are written as raw byte arrays (base64 in JSON).
+   * <p/>
+   * This is consistent with {@link io.airbyte.integrations.source.mongodb.state.IdType#idToStringRepresenation}
+   * which also only converts UUID_STANDARD to UUID string format.
+   */
+  private static void readBinaryField(final ObjectNode o, final BsonReader reader, final String fieldName) {
+    final BsonBinary bsonBinary = reader.readBinaryData();
+    if (bsonBinary == null) {
+      o.putNull(fieldName);
+      return;
+    }
+    if (bsonBinary.getType() == BsonBinarySubType.UUID_STANDARD.getValue()) {
+      final UUID uuid = UuidHelper.decodeBinaryToUuid(bsonBinary.getData(), bsonBinary.getType(), UuidRepresentation.STANDARD);
+      o.put(fieldName, uuid.toString());
+    } else {
+      o.put(fieldName, toByteArray(bsonBinary));
+    }
   }
 
   private static void readNull(final ObjectNode o, final BsonReader reader, final String fieldName) {

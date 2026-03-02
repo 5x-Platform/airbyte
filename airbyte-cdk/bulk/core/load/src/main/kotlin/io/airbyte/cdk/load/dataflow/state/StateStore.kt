@@ -45,11 +45,8 @@ class StateStore(
     fun accept(msg: CheckpointMessage) {
         val key = keyClient.getStateKey(msg)
 
-        val stats =
-            requireNotNull(msg.sourceStats) {
-                "sourceStats must be set with recordCount for state message id=${key.id}"
-            }
-        histogramStore.acceptExpectedCounts(key, stats.recordCount)
+        val recordCount = msg.sourceStats?.recordCount ?: 0L
+        histogramStore.acceptExpectedCounts(key, recordCount)
 
         when (msg) {
             is GlobalCheckpoint,

@@ -1,0 +1,8 @@
+[tool.poe.tasks.test]
+cmd = "./gradlew :airbyte-integrations:connectors:destination-azure-synapse:test"
+
+[tool.poe.tasks.integrationTest]
+cmd = "./gradlew :airbyte-integrations:connectors:destination-azure-synapse:integrationTest"
+
+[tool.poe.tasks.build]
+cmd = "./gradlew :airbyte-integrations:connectors:destination-azure-synapse:build"

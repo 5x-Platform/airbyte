@@ -78,7 +78,7 @@ public class MongoDbCdcInitializer {
     // #35059: debezium heartbeats are not sent on the expected interval. this is
     // a workaround to allow making subsequent wait time configurable.
     LOGGER.info("Subsequent cdc record wait time: {} seconds", firstRecordWaitTime);
-    final Duration initialLoadTimeout = InitialLoadTimeoutUtil.getInitialLoadTimeout(config.rawConfig());
+    final Duration initialLoadTimeout = getMongoDbInitialLoadTimeout(config);
 
     final int queueSize = MongoUtil.getDebeziumEventQueueSize(config);
     final boolean isEnforceSchema = config.getEnforceSchema();
@@ -355,6 +355,32 @@ public class MongoDbCdcInitializer {
     } catch (final Exception e) {
       LOGGER.warn("Unable to query for op log stats, exception: {}" + e.getMessage());
     }
+  }
+
+  /**
+   * MongoDB connector stores initial_load_timeout_hours at the root level of the config,
+   * not under replication_method like MySQL/Postgres. The CDK's InitialLoadTimeoutUtil
+   * only looks under replication_method, so we need a custom implementation here.
+   * Also removes the 24-hour cap since large MongoDB collections (e.g. 36M+ rows)
+   * can legitimately need more time for initial snapshot.
+   */
+  private static Duration getMongoDbInitialLoadTimeout(final MongoDbSourceConfig config) {
+    final Duration defaultTimeout = Duration.ofHours(8);
+    final JsonNode rawConfig = config.rawConfig();
+
+    if (rawConfig.has("initial_load_timeout_hours")) {
+      final int hours = rawConfig.get("initial_load_timeout_hours").asInt();
+      if (hours > 0) {
+        final Duration timeout = Duration.ofHours(hours);
+        LOGGER.info("Initial Load timeout (from config): {} hours ({} seconds)", hours, timeout.getSeconds());
+        return timeout;
+      }
+    }
+
+    // Fall back to CDK utility (checks replication_method path) for compatibility
+    final Duration cdkTimeout = InitialLoadTimeoutUtil.getInitialLoadTimeout(rawConfig);
+    LOGGER.info("Initial Load timeout (from CDK default): {} seconds", cdkTimeout.getSeconds());
+    return cdkTimeout;
   }
 
 }

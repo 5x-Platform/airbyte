@@ -14,6 +14,7 @@ import io.airbyte.cdk.load.message.CheckpointMessageWrapped
 import io.airbyte.cdk.load.message.DestinationFile
 import io.airbyte.cdk.load.message.DestinationFileStreamComplete
 import io.airbyte.cdk.load.message.DestinationRecord
+import io.airbyte.cdk.load.message.DestinationRecordRaw
 import io.airbyte.cdk.load.message.DestinationRecordStreamComplete
 import io.airbyte.cdk.load.message.DestinationStreamAffinedMessage
 import io.airbyte.cdk.load.message.FileTransferQueueEndOfStream
@@ -24,7 +25,9 @@ import io.airbyte.cdk.load.message.GlobalCheckpointWrapped
 import io.airbyte.cdk.load.message.GlobalSnapshotCheckpoint
 import io.airbyte.cdk.load.message.GlobalSnapshotCheckpointWrapped
 import io.airbyte.cdk.load.message.MessageQueue
+import io.airbyte.cdk.load.message.PartitionedQueue
 import io.airbyte.cdk.load.message.PipelineEndOfStream
+import io.airbyte.cdk.load.message.PipelineEvent
 import io.airbyte.cdk.load.message.PipelineHeartbeat
 import io.airbyte.cdk.load.message.PipelineMessage
 import io.airbyte.cdk.load.message.QueueWriter
@@ -68,7 +71,10 @@ class PipelineEventBookkeepingRouter(
     private val batchStateUpdateQueue: ChannelMessageQueue<BatchUpdate>,
     @Named("numDataChannels") private val numDataChannels: Int,
     @Named("markEndOfStreamAtEndOfSync") private val markEndOfStreamAtEndOfSync: Boolean,
-    private val namespaceMapper: NamespaceMapper
+    private val namespaceMapper: NamespaceMapper,
+    @Named("_pipelineInputQueue")
+    private val pipelineInputQueue:
+        PartitionedQueue<PipelineEvent<StreamKey, DestinationRecordRaw>>,
 ) : CloseableCoroutine {
     private val log = KotlinLogging.logger {}
     private val clientCount = AtomicInteger(numDataChannels)
@@ -280,8 +286,26 @@ class PipelineEventBookkeepingRouter(
                 catalog.streams.forEach {
                     val sawComplete = sawEndOfStreamComplete.contains(it.mappedDescriptor)
                     val manager = syncManager.getStreamManager(it.mappedDescriptor)
-                    if (sawComplete) {
-                        manager.markEndOfStream(true)
+                    // Always mark endOfStream as complete when markEndOfStreamAtEndOfSync
+                    // is enabled. We treat end-of-input as implicit stream completion,
+                    // so pass true to ensure WriteOperation doesn't throw
+                    // StreamsIncompleteException. Without this, platforms that don't
+                    // forward STREAM_STATUS TRACE would cause the sync to fail
+                    // even though all data was successfully loaded.
+                    manager.markEndOfStream(true)
+                    // Broadcast PipelineEndOfStream so LoadPipelineStepTask calls
+                    // finishKeys() → DirectLoader.finish() to commit remaining records.
+                    // This is normally emitted by handleStreamMessage when it receives
+                    // DestinationRecordStreamComplete, but when the platform doesn't
+                    // forward STREAM_STATUS TRACE, it must be emitted here.
+                    if (!sawComplete) {
+                        log.info {
+                            "Broadcasting PipelineEndOfStream for stream " +
+                                "${it.mappedDescriptor} (inferred at end of sync)"
+                        }
+                        pipelineInputQueue.broadcast(
+                            PipelineEndOfStream(it.mappedDescriptor)
+                        )
                     }
                     batchStateUpdateQueue.publish(
                         BatchEndOfStream(

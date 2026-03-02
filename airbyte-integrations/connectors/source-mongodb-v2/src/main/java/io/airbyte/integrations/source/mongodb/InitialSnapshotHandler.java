@@ -68,28 +68,46 @@ public class InitialSnapshotHandler {
           final var namespace = airbyteStream.getStream().getNamespace();
           final var collection = database.getCollection(collectionName);
           final var fields = Projections.fields(Projections.include(CatalogHelpers.getTopLevelFieldNames(airbyteStream).stream().toList()));
-          final var idTypes = aggregateIdField(collection);
-          if (idTypes.size() > 1) {
-            LOGGER.warn("The _id fields in this collection are not consistently typed, which may lead to data loss (collection = {}).",
-                collectionName);
-            AirbyteTraceMessageUtility
-                .emitAnalyticsTrace(new AirbyteAnalyticsTraceMessage().withType(MULTIPLE_ID_TYPES_ANALYTICS_MESSAGE_KEY).withValue("1"));
-          }
 
-          idTypes.stream().findFirst().ifPresent(idType -> {
-            if (IdType.findByBsonType(idType).isEmpty()) {
-              throw new ConfigErrorException("Only _id fields with the following types are currently supported: " + IdType.SUPPORTED
-                  + " (collection = " + collectionName + ").");
+          // Skip expensive aggregateIdField ($group scan on entire collection) for large collections
+          // to avoid multi-hour delays on collections with hundreds of millions of rows.
+          // The estimatedSyncBytes from the catalog estimate (already calculated) is used as a heuristic.
+          final boolean skipExpensiveOps = config.getSkipCollectionStats();
+          if (!skipExpensiveOps) {
+            final var idTypes = aggregateIdField(collection);
+            if (idTypes.size() > 1) {
+              LOGGER.warn("The _id fields in this collection are not consistently typed, which may lead to data loss (collection = {}).",
+                  collectionName);
+              AirbyteTraceMessageUtility
+                  .emitAnalyticsTrace(new AirbyteAnalyticsTraceMessage().withType(MULTIPLE_ID_TYPES_ANALYTICS_MESSAGE_KEY).withValue("1"));
             }
-          });
+
+            idTypes.stream().findFirst().ifPresent(idType -> {
+              if (IdType.findByBsonType(idType).isEmpty()) {
+                throw new ConfigErrorException("Only _id fields with the following types are currently supported: " + IdType.SUPPORTED
+                    + " (collection = " + collectionName + ").");
+              }
+            });
+          } else {
+            LOGGER.info("Skipping _id type validation and collection stats for collection: {}.{} (skip_collection_stats=true)",
+                namespace, collectionName);
+          }
 
           // find the existing state, if there is one, for this stream
           final Optional<MongoDbStreamState> existingState =
               stateManager.getStreamState(airbyteStream.getStream().getName(), airbyteStream.getStream().getNamespace());
 
-          final Optional<CollectionStatistics> collectionStatistics = MongoUtil.getCollectionStatistics(database, airbyteStream);
+          final int chunkSize;
+          if (skipExpensiveOps) {
+            chunkSize = MongoUtil.DEFAULT_CHUNK_SIZE;
+            LOGGER.info("Using default chunk size {} for collection: {}.{} (skip_collection_stats=true)",
+                chunkSize, namespace, collectionName);
+          } else {
+            final Optional<CollectionStatistics> collectionStatistics = MongoUtil.getCollectionStatistics(database, airbyteStream);
+            chunkSize = MongoUtil.getChunkSizeForCollection(collectionStatistics, airbyteStream);
+          }
           final var recordIterator = new MongoDbInitialLoadRecordIterator(collection, fields, existingState, isEnforceSchema,
-              MongoUtil.getChunkSizeForCollection(collectionStatistics, airbyteStream), emittedAt, cdcInitialLoadTimeout);
+              chunkSize, emittedAt, cdcInitialLoadTimeout);
           final var stateIterator =
               new SourceStateIterator<>(recordIterator, airbyteStream, stateManager, new StateEmitFrequency(checkpointInterval,
                   MongoConstants.CHECKPOINT_DURATION));
