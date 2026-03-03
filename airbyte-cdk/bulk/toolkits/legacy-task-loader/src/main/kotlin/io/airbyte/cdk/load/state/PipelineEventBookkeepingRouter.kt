@@ -282,16 +282,23 @@ class PipelineEventBookkeepingRouter(
     override suspend fun close() {
         log.info { "Maybe closing bookkeeping router ${clientCount.get()}" }
         if (clientCount.decrementAndGet() == 0) {
-            if (markEndOfStreamAtEndOfSync) {
-                catalog.streams.forEach {
-                    val sawComplete = sawEndOfStreamComplete.contains(it.mappedDescriptor)
-                    val manager = syncManager.getStreamManager(it.mappedDescriptor)
-                    // Always mark endOfStream as complete when markEndOfStreamAtEndOfSync
-                    // is enabled. We treat end-of-input as implicit stream completion,
-                    // so pass true to ensure WriteOperation doesn't throw
-                    // StreamsIncompleteException. Without this, platforms that don't
-                    // forward STREAM_STATUS TRACE would cause the sync to fail
-                    // even though all data was successfully loaded.
+            catalog.streams.forEach {
+                val sawComplete = sawEndOfStreamComplete.contains(it.mappedDescriptor)
+                val manager = syncManager.getStreamManager(it.mappedDescriptor)
+
+                // Process stream in close() if:
+                // 1. markEndOfStreamAtEndOfSync is true: we always defer marking to
+                //    close() time (SOCKET mode, or when COMPLETE was received but
+                //    marking was deferred)
+                // 2. OR the stream never received a COMPLETE message: some platforms
+                //    don't forward STREAM_STATUS TRACE messages to the destination,
+                //    so we treat end-of-input as implicit stream completion to avoid
+                //    failing the sync even though all data was successfully loaded.
+                if (markEndOfStreamAtEndOfSync || !sawComplete) {
+                    // Mark end of stream. When markEndOfStreamAtEndOfSync is false
+                    // and sawComplete is also false, this is the first (and only) call.
+                    // When markEndOfStreamAtEndOfSync is true, markEndOfStream was
+                    // deferred from handleStreamMessage to here.
                     manager.markEndOfStream(true)
                     // Broadcast PipelineEndOfStream so LoadPipelineStepTask calls
                     // finishKeys() → DirectLoader.finish() to commit remaining records.

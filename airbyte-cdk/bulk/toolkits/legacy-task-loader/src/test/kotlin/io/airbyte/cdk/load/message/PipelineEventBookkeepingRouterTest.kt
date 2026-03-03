@@ -430,19 +430,22 @@ class PipelineEventBookkeepingRouterTest {
     }
 
     @Test
-    fun `close with deferred EOS marks only streams that saw complete`() = runTest {
+    fun `close with deferred EOS marks all streams`() = runTest {
         val r = router(numDataChannels = 2, markEndOfStreamAtEnd = true)
 
         r.handleStreamMessage(
             DestinationRecordStreamComplete(stream1, 0L),
         )
 
+        // First close only decrements the counter (2 -> 1), no action yet.
         r.close()
         coVerify(exactly = 0) { streamManager1.markEndOfStream(true) }
 
+        // Second close decrements to 0, triggering the actual close logic.
         r.close()
+        // Both streams should be marked as end-of-stream at close time.
         coVerify(exactly = 1) { streamManager1.markEndOfStream(true) }
-        coVerify(exactly = 0) { streamManager2.markEndOfStream(true) }
+        coVerify(exactly = 1) { streamManager2.markEndOfStream(true) }
 
         coVerify {
             batchStateUpdateQueue.publish(
@@ -458,7 +461,7 @@ class PipelineEventBookkeepingRouterTest {
     }
 
     @Test
-    fun `close without deferred EOS does not re-mark streams`() = runTest {
+    fun `close without deferred EOS does not re-mark streams that received COMPLETE`() = runTest {
         val r = router(numDataChannels = 1, markEndOfStreamAtEnd = false)
         r.handleStreamMessage(
             DestinationRecordStreamComplete(stream2, 0L),
@@ -466,10 +469,58 @@ class PipelineEventBookkeepingRouterTest {
         coVerify { streamManager2.markEndOfStream(true) }
 
         r.close()
+        // stream2 received COMPLETE so should NOT be re-processed in close()
         coVerify(exactly = 0) {
             batchStateUpdateQueue.publish(
                 match { it is BatchEndOfStream && it.stream == stream2.mappedDescriptor }
             )
         }
+        // stream1 did NOT receive COMPLETE, so it should be marked at close()
+        // (handles platforms that don't forward STREAM_STATUS TRACE)
+        coVerify(exactly = 1) { streamManager1.markEndOfStream(true) }
+        coVerify {
+            batchStateUpdateQueue.publish(
+                match { it is BatchEndOfStream && it.stream == stream1.mappedDescriptor }
+            )
+        }
+    }
+
+    @Test
+    fun `close without deferred EOS marks all streams when no COMPLETE received`() = runTest {
+        // Simulates STDIO mode where platform doesn't forward STREAM_STATUS TRACE
+        val r = router(numDataChannels = 1, markEndOfStreamAtEnd = false)
+
+        // Don't send any COMPLETE messages - simulating platform not forwarding them
+        r.close()
+
+        // Both streams should be marked as end-of-stream at close time
+        coVerify(exactly = 1) { streamManager1.markEndOfStream(true) }
+        coVerify(exactly = 1) { streamManager2.markEndOfStream(true) }
+
+        // PipelineEndOfStream should be broadcast for both streams
+        coVerify {
+            pipelineInputQueue.broadcast(
+                match { it is PipelineEndOfStream && it.stream == stream1.mappedDescriptor }
+            )
+        }
+        coVerify {
+            pipelineInputQueue.broadcast(
+                match { it is PipelineEndOfStream && it.stream == stream2.mappedDescriptor }
+            )
+        }
+
+        // BatchEndOfStream should be published for both streams
+        coVerify {
+            batchStateUpdateQueue.publish(
+                match { it is BatchEndOfStream && it.stream == stream1.mappedDescriptor }
+            )
+        }
+        coVerify {
+            batchStateUpdateQueue.publish(
+                match { it is BatchEndOfStream && it.stream == stream2.mappedDescriptor }
+            )
+        }
+
+        coVerify { syncManager.markInputConsumed() }
     }
 }

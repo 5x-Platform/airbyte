@@ -79,46 +79,55 @@ class MSSQLCsvRowGenerator(private val validateValuesPreLoad: Boolean) {
     fun generate(record: DestinationRecordRaw, schema: ObjectType): List<Any> {
         val enrichedRecord = record.asEnrichedDestinationRecordAirbyteValue()
 
-        if (validateValuesPreLoad) {
-            enrichedRecord.declaredFields.values.forEach { value ->
-                if (value.abValue is NullValue) {
-                    return@forEach
-                }
-                val actualValue = value.abValue
-                when (value.type) {
-                    // Enforce numeric range
-                    is IntegerType -> LIMITS.validateInteger(value)
-                    is NumberType -> LIMITS.validateNumber(value)
+        // Always perform essential MSSQL-specific type conversions that are
+        // required for BULK INSERT to work (not just optional validation).
+        enrichedRecord.declaredFields.values.forEach { value ->
+            if (value.abValue is NullValue) {
+                return@forEach
+            }
+            val actualValue = value.abValue
+            when (value.type) {
+                // SQL Server BULK INSERT expects booleans as 0 or 1;
+                // "true"/"false" strings cause data conversion errors for BIT columns.
+                is BooleanType ->
+                    value.abValue =
+                        if ((actualValue as BooleanValue).value) LIMITS.TRUE else LIMITS.FALSE
 
-                    // SQL server expects booleans as 0 or 1
-                    is BooleanType ->
-                        value.abValue =
-                            if ((actualValue as BooleanValue).value) LIMITS.TRUE else LIMITS.FALSE
+                // MSSQL requires a specific timestamp format - in particular,
+                // "2000-01-01T00:00Z" causes an error.
+                // MSSQL requires "2000-01-01T00:00:00Z".
+                is TimestampTypeWithTimezone ->
+                    value.abValue =
+                        StringValue(
+                            (actualValue as TimestampWithTimezoneValue)
+                                .value
+                                .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+                        )
+                is TimestampTypeWithoutTimezone ->
+                    value.abValue =
+                        StringValue(
+                            (actualValue as TimestampWithoutTimezoneValue)
+                                .value
+                                .format(DateTimeFormatter.ISO_DATE_TIME)
+                        )
 
-                    // MSSQL requires a specific timestamp format - in particular,
-                    // "2000-01-01T00:00Z" causes an error.
-                    // MSSQL requires "2000-01-01T00:00:00Z".
-                    is TimestampTypeWithTimezone ->
-                        value.abValue =
-                            StringValue(
-                                (actualValue as TimestampWithTimezoneValue)
-                                    .value
-                                    .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
-                            )
-                    is TimestampTypeWithoutTimezone ->
-                        value.abValue =
-                            StringValue(
-                                (actualValue as TimestampWithoutTimezoneValue)
-                                    .value
-                                    .format(DateTimeFormatter.ISO_DATE_TIME)
-                            )
+                else -> {
+                    // Additional validation only when validateValuesPreLoad is enabled
+                    if (validateValuesPreLoad) {
+                        when (value.type) {
+                            // Enforce numeric range
+                            is IntegerType -> LIMITS.validateInteger(value)
+                            is NumberType -> LIMITS.validateNumber(value)
 
-                    // serialize complex types to string
-                    is ArrayType,
-                    is ObjectType,
-                    is UnionType,
-                    is UnknownType -> value.abValue = StringValue(actualValue.serializeToString())
-                    else -> {}
+                            // serialize complex types to string
+                            is ArrayType,
+                            is ObjectType,
+                            is UnionType,
+                            is UnknownType ->
+                                value.abValue = StringValue(actualValue.serializeToString())
+                            else -> {}
+                        }
+                    }
                 }
             }
         }

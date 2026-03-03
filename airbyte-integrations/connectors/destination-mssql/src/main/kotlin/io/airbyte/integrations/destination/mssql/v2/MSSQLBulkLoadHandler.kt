@@ -30,6 +30,28 @@ class MSSQLBulkLoadHandler(
     }
 
     /**
+     * Lazily detects whether the connected SQL Server instance is running on Linux.
+     * The CODEPAGE option in BULK INSERT is not supported on Linux, so we need to
+     * conditionally exclude it.
+     */
+    private val isLinuxServer: Boolean by lazy {
+        try {
+            dataSource.connection.use { conn ->
+                conn.createStatement().use { stmt ->
+                    stmt.executeQuery(
+                        "SELECT host_platform FROM sys.dm_os_host_info"
+                    ).use { rs ->
+                        rs.next() && rs.getString("host_platform").equals("Linux", ignoreCase = true)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.warn(e) { "Unable to detect server platform; assuming Windows for CODEPAGE support" }
+            false
+        }
+    }
+
+    /**
      * Bulk-load data in "append-overwrite" mode from the CSV file located in Azure Blob Storage.
      *
      * @param dataFilePath The path to the CSV file in Azure Blob Storage
@@ -201,12 +223,14 @@ class MSSQLBulkLoadHandler(
         // The ROWS_PER_BATCH hint can help optimize the bulk load.
         // If not provided, it won't be included in the statement.
         val rowBatchClause = rowsPerBatch?.let { "ROWS_PER_BATCH = $it," } ?: ""
+        // CODEPAGE is not supported on SQL Server for Linux
+        val codePageClause = if (!isLinuxServer) "\tCODEPAGE = '$CODE_PAGE',\n" else ""
         return StringBuilder()
             .apply {
                 append("BULK INSERT $quotedTableName\n")
                 append("FROM '$dataFilePath'\n")
                 append("WITH (\n")
-                append("\tCODEPAGE = '$CODE_PAGE',\n")
+                append(codePageClause)
                 append("\tDATA_SOURCE = '$bulkUploadDataSource',\n")
                 append("\tFORMATFILE_DATA_SOURCE = '$bulkUploadDataSource',\n")
                 append("\tFIRSTROW = 2,\n")

@@ -188,6 +188,11 @@ const val DELETE_WHERE_COL_LESS_THAN =
         WHERE [?] < ?
     """
 
+const val TRUNCATE_TABLE =
+    """
+        TRUNCATE TABLE [?].[?]
+    """
+
 const val SELECT_FROM = """
         SELECT *
         FROM [?].[?]
@@ -340,6 +345,9 @@ class MSSQLQueryBuilder(
                 minGenerationId.toString(),
             )
             .executeUpdate(connection)
+
+    fun deleteAllFromTable(connection: Connection) =
+        TRUNCATE_TABLE.toQuery(outputSchema, tableName).executeUpdate(connection)
 
     fun populateStatement(
         statement: PreparedStatement,

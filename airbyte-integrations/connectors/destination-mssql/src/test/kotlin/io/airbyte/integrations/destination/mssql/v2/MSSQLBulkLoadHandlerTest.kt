@@ -12,7 +12,9 @@ import io.mockk.slot
 import io.mockk.verify
 import java.sql.Connection
 import java.sql.PreparedStatement
+import java.sql.ResultSet
 import java.sql.SQLException
+import java.sql.Statement
 import javax.sql.DataSource
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -30,6 +32,21 @@ class MSSQLBulkLoadHandlerTest {
 
     private lateinit var bulkLoadHandler: MSSQLBulkLoadHandler
 
+    /**
+     * Creates a mock for the platform detection connection used by the lazy isLinuxServer property.
+     * This is separate from the main [connection] mock used for bulk insert operations.
+     */
+    private fun mockPlatformDetection(platform: String = "Windows"): Connection {
+        val platformConnection = mockk<Connection>(relaxed = true)
+        val platformStatement = mockk<Statement>(relaxed = true)
+        val platformResultSet = mockk<ResultSet>(relaxed = true)
+        every { platformResultSet.next() } returns true
+        every { platformResultSet.getString("host_platform") } returns platform
+        every { platformStatement.executeQuery(any()) } returns platformResultSet
+        every { platformConnection.createStatement() } returns platformStatement
+        return platformConnection
+    }
+
     @BeforeEach
     fun setUp() {
         // Mockk initialization
@@ -38,8 +55,9 @@ class MSSQLBulkLoadHandlerTest {
         preparedStatement = mockk(relaxed = true)
         mssqlQueryBuilder = mockk(relaxed = true)
 
-        // Common stubs
-        every { dataSource.connection } returns connection
+        // Platform detection returns a separate connection, then bulk ops use the main one
+        val platformConnection = mockPlatformDetection("Windows")
+        every { dataSource.connection } returnsMany listOf(platformConnection, connection)
         every { connection.prepareStatement(any()) } returns preparedStatement
         every { connection.autoCommit = any() } just runs
         every { connection.commit() } just runs
@@ -363,6 +381,60 @@ class MSSQLBulkLoadHandlerTest {
         assertTrue(
             tempTableName.length > "##TempTable_".length,
             "Temp table name should contain a timestamp suffix"
+        )
+    }
+
+    @Test
+    fun `test bulkLoadForAppendOverwrite excludes CODEPAGE on Linux`() {
+        // Create a Linux-aware handler
+        val linuxPlatformConnection = mockPlatformDetection("Linux")
+        val linuxDataSource = mockk<DataSource>(relaxed = true)
+        every { linuxDataSource.connection } returnsMany listOf(linuxPlatformConnection, connection)
+
+        val linuxBulkLoadHandler =
+            MSSQLBulkLoadHandler(
+                dataSource = linuxDataSource,
+                schemaName = "dbo",
+                mainTableName = "MyMainTable",
+                bulkUploadDataSource = "MyBlobDataSource",
+                mssqlQueryBuilder = mssqlQueryBuilder
+            )
+
+        every { mssqlQueryBuilder.hasCdc } returns false
+        val dataFilePath = "azure://container/path/to/file.csv"
+        val formatFilePath = "azure://container/path/to/format.fmt"
+
+        linuxBulkLoadHandler.bulkLoadForAppendOverwrite(
+            dataFilePath = dataFilePath,
+            formatFilePath = formatFilePath
+        )
+
+        val sqlSlot = slot<String>()
+        verify { connection.prepareStatement(capture(sqlSlot)) }
+        assertFalse(
+            sqlSlot.captured.contains("CODEPAGE"),
+            "CODEPAGE should not be present for Linux SQL Server"
+        )
+        assertTrue(sqlSlot.captured.contains("BULK INSERT [dbo].[MyMainTable]"))
+        assertTrue(sqlSlot.captured.contains("DATA_SOURCE = 'MyBlobDataSource'"))
+    }
+
+    @Test
+    fun `test bulkLoadForAppendOverwrite includes CODEPAGE on Windows`() {
+        every { mssqlQueryBuilder.hasCdc } returns false
+        val dataFilePath = "azure://container/path/to/file.csv"
+        val formatFilePath = "azure://container/path/to/format.fmt"
+
+        bulkLoadHandler.bulkLoadForAppendOverwrite(
+            dataFilePath = dataFilePath,
+            formatFilePath = formatFilePath
+        )
+
+        val sqlSlot = slot<String>()
+        verify { connection.prepareStatement(capture(sqlSlot)) }
+        assertTrue(
+            sqlSlot.captured.contains("CODEPAGE = '65001'"),
+            "CODEPAGE should be present for Windows SQL Server"
         )
     }
 
