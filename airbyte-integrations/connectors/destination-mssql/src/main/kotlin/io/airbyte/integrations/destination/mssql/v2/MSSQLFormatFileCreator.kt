@@ -9,9 +9,11 @@ import io.airbyte.cdk.load.data.csv.toCsvHeader
 import io.airbyte.cdk.load.data.withAirbyteMeta
 import io.airbyte.cdk.load.file.azureBlobStorage.AzureBlob
 import io.airbyte.cdk.load.file.azureBlobStorage.AzureBlobClient
+import io.github.oshai.kotlinlogging.KotlinLogging
 import javax.sql.DataSource
 import kotlinx.coroutines.runBlocking
 
+private val logger = KotlinLogging.logger {}
 private const val COLLATION = "SQL_Latin1_General_CP1_CI_AS"
 
 internal class MSSQLFormatFileCreator(
@@ -48,6 +50,19 @@ internal class MSSQLFormatFileCreator(
         val csvColumnNames = stream.schema.withAirbyteMeta(true).toCsvHeader().toList()
         val csvToDbMapping = buildCsvToDbMapping(csvColumnNames, dbColumns)
 
+        // Log the CSV-to-DB mapping for datetime columns (diagnostic)
+        csvToDbMapping.filter { it.dbDataType.lowercase() in
+            listOf("datetime", "datetime2", "datetimeoffset", "date", "time", "smalldatetime")
+        }.forEach { mapping ->
+            logger.info {
+                "Format file mapping: csvPos=${mapping.csvPosition}, " +
+                    "dbOrdinal=${mapping.dbOrdinal}, " +
+                    "dbColumn=${mapping.dbColumnName}, " +
+                    "dbType=${mapping.dbDataType}, " +
+                    "dbCharLen=${mapping.dbCharLength}"
+            }
+        }
+
         // 4) Generate the .fmt content
         val fmtContent =
             buildFormatFileContent(
@@ -56,6 +71,8 @@ internal class MSSQLFormatFileCreator(
                 rowDelimiter = "\\r\\n",
                 formatFileVersion = "12.0",
             )
+
+        logger.info { "Format file content for ${stream.mappedDescriptor}:\n$fmtContent" }
 
         // 5) Upload the format file to Azure Blob Storage
         val blobPath = buildFormatFileBlobPath(targetSchema)
@@ -194,8 +211,9 @@ internal class MSSQLFormatFileCreator(
             "datetime",
             "smalldatetime",
             "datetime2",
+            "datetimeoffset",
             "date",
-            "time" -> "SQLCHAR" to 25
+            "time" -> "SQLCHAR" to 40
             "decimal",
             "numeric",
             "money",

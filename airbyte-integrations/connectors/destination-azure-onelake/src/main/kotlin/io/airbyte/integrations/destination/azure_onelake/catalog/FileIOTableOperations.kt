@@ -33,7 +33,8 @@ private val logger = KotlinLogging.logger {}
  *
  * The `<NNNNN>-<uuid>.metadata.json` naming matches the REST/Hive catalog convention
  * used by Fabric's auto-virtualization (Apache XTable). The `version-hint.text` file
- * stores the latest metadata file path for fast discovery.
+ * stores the latest metadata version number (integer) per the Iceberg file-system table
+ * spec, enabling Fabric and other Hadoop-based readers to discover the current metadata.
  *
  * Thread safety: operations are synchronized on this instance. For single-writer
  * scenarios (Airbyte destination), this provides sufficient guarantees.
@@ -107,8 +108,9 @@ class FileIOTableOperations(
         TableMetadataParser.overwrite(metadata, outputFile)
         logger.info { "Wrote table metadata to $newMetadataPath" }
 
-        // Update version hint with the full metadata file path for discovery
-        writeVersionHint(newMetadataPath)
+        // Update version hint with integer version per Iceberg file-system table spec.
+        // Fabric's Hadoop-based reader expects Integer.parseInt(content) to succeed.
+        writeVersionHint(newVersion)
 
         this.version = newVersion
         this.currentMetadata = metadata
@@ -164,7 +166,7 @@ class FileIOTableOperations(
 
     /**
      * Find the latest metadata file path.
-     * Tries version-hint.text first (which stores the full path),
+     * Tries version-hint.text first (integer version or full path for backward compat),
      * then falls back to scanning the metadata directory.
      */
     private fun findLatestMetadataFile(): String? {
@@ -178,21 +180,30 @@ class FileIOTableOperations(
                 ).use { it.readText().trim() }
 
                 if (content.isNotEmpty()) {
-                    // version-hint.text may contain a full path or just a version number (legacy)
+                    // Backward compat: version-hint.text may contain a full path
+                    // (written by older versions of this connector)
                     if (content.endsWith(".metadata.json")) {
                         logger.debug { "Found metadata path in version-hint: $content" }
                         return content
                     }
-                    // Legacy format: version-hint.text contains just an integer version
+                    // Standard format: version-hint.text contains just an integer version
                     val ver = content.toIntOrNull()
                     if (ver != null) {
-                        // Try legacy v<N>.metadata.json path
+                        // Try our NNNNN-uuid.metadata.json format first (scan for matching version)
+                        val paddedVersion = String.format("%05d", ver)
+                        val matchingFile = findMetadataFileByPrefix(paddedVersion)
+                        if (matchingFile != null) {
+                            logger.debug { "Found metadata v$ver at $matchingFile" }
+                            return matchingFile
+                        }
+                        // Try legacy v<N>.metadata.json path (Hadoop convention)
                         val legacyPath = "$tableLocation/metadata/v$ver.metadata.json"
                         val legacyFile = fileIO.newInputFile(legacyPath)
                         if (legacyFile.exists()) {
                             logger.debug { "Found legacy metadata v$ver at $legacyPath" }
                             return legacyPath
                         }
+                        logger.warn { "version-hint.text says v$ver but no matching metadata file found" }
                     }
                 }
             }
@@ -202,6 +213,27 @@ class FileIOTableOperations(
 
         // Fall back to listing metadata directory
         return findLatestMetadataByListing()
+    }
+
+    /**
+     * Find a metadata file by its padded version prefix (e.g., "00041").
+     * Scans the metadata directory for files matching `<paddedVersion>-*.metadata.json`.
+     */
+    private fun findMetadataFileByPrefix(paddedVersion: String): String? {
+        if (fileIO !is SupportsPrefixOperations) return null
+        try {
+            val prefix = "$tableLocation/metadata/$paddedVersion-"
+            val files = (fileIO as SupportsPrefixOperations).listPrefix(prefix)
+            for (fileInfo in files) {
+                val location = fileInfo.location()
+                if (location.endsWith(".metadata.json")) {
+                    return location
+                }
+            }
+        } catch (e: Exception) {
+            logger.debug(e) { "Failed to find metadata file with prefix $paddedVersion" }
+        }
+        return null
     }
 
     /**
@@ -242,15 +274,25 @@ class FileIOTableOperations(
     }
 
     /**
-     * Write version-hint.text with the full path to the latest metadata file.
+     * Write version-hint.text with the integer version number.
+     *
+     * Per the Iceberg file-system table spec, version-hint.text contains just the
+     * integer version (e.g., "41"). Fabric's Hadoop-based Iceberg reader calls
+     * Integer.parseInt() on this content — writing a full abfss:// path here causes
+     * a NumberFormatException and prevents Fabric from discovering the table metadata.
+     *
+     * Note: our metadata files use the `NNNNN-uuid.metadata.json` naming convention
+     * (not Hadoop's `v<N>.metadata.json`). Readers that parse the version-hint integer
+     * and look for `v<N>.metadata.json` will fall back to directory listing, which will
+     * find our `NNNNN-uuid.metadata.json` files successfully.
      */
-    private fun writeVersionHint(metadataFilePath: String) {
+    private fun writeVersionHint(version: Int) {
         try {
             val outputFile = fileIO.newOutputFile(versionHintPath())
             outputFile.createOrOverwrite().use { stream ->
-                stream.write(metadataFilePath.toByteArray(StandardCharsets.UTF_8))
+                stream.write(version.toString().toByteArray(StandardCharsets.UTF_8))
             }
-            logger.debug { "Updated version-hint.text to $metadataFilePath" }
+            logger.debug { "Updated version-hint.text to version $version" }
         } catch (e: Exception) {
             // Non-fatal: findLatestMetadataFile() will fall back to listing
             logger.warn(e) {

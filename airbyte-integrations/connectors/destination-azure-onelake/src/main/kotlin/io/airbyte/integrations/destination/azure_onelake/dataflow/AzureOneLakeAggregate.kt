@@ -10,6 +10,8 @@ import io.airbyte.cdk.load.data.IntegerValue
 import io.airbyte.cdk.load.data.NumberValue
 import io.airbyte.cdk.load.data.ObjectValue
 import io.airbyte.cdk.load.data.StringValue
+import io.airbyte.cdk.load.data.TimeWithTimezoneValue
+import io.airbyte.cdk.load.data.TimeWithoutTimezoneValue
 import io.airbyte.cdk.load.data.TimestampWithTimezoneValue
 import io.airbyte.cdk.load.data.TimestampWithoutTimezoneValue
 import io.airbyte.cdk.load.dataflow.aggregate.Aggregate
@@ -84,6 +86,13 @@ class AzureOneLakeAggregate(
                 // Add UTC offset since NTZ values have no inherent timezone.
                 value is TimestampWithoutTimezoneValue ->
                     name to TimestampWithTimezoneValue(value.value.atOffset(ZoneOffset.UTC))
+
+                // TimeType → StringType (Delta Lake has no TIME type)
+                // Schema was changed from TimeType to StringType for Fabric.
+                value is TimeWithoutTimezoneValue ->
+                    name to StringValue(value.value.toString())
+                value is TimeWithTimezoneValue ->
+                    name to StringValue(value.value.toString())
 
                 else -> name to value
             }

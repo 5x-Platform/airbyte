@@ -20,6 +20,12 @@ SERVERS=(
   "sg-prod-finance-77192.servers.mongodirector.com"
   "sg-prod-finance-77193.servers.mongodirector.com"
   "sg-prod-finance-77194.servers.mongodirector.com"
+  "sg-qa-audit-notification-75888.servers.mongodirector.com"
+  "sg-qa-audit-notification-75889.servers.mongodirector.com"
+  "sg-qa-audit-notification-75890.servers.mongodirector.com"
+  "sg-dev-75758.servers.mongodirector.com"
+  "sg-dev-75759.servers.mongodirector.com"
+  "sg-dev-75760.servers.mongodirector.com"
 )
 
 for server in "${SERVERS[@]}"; do

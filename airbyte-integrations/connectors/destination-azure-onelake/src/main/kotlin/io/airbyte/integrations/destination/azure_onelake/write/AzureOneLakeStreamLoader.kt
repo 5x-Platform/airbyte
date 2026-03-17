@@ -222,6 +222,31 @@ class AzureOneLakeStreamLoader(
             }
         }
 
+        // FABRIC COMPATIBILITY: If existing table has TimeType columns, drop and recreate.
+        // TimeType → StringType is NOT a standard Iceberg type promotion, so the schema
+        // synchronizer can't handle it. The table must be recreated with the correct schema.
+        // This only triggers once — after recreation, the table will have StringType columns.
+        val hasTimeColumns = table.schema().columns().any { it.type() is Types.TimeType }
+        if (hasTimeColumns) {
+            val tableIdentifier = tableIdGenerator.toTableIdentifier(stream.mappedDescriptor)
+            val timeFieldNames = table.schema().columns()
+                .filter { it.type() is Types.TimeType }
+                .map { it.name() }
+            logger.info {
+                "Existing table has TimeType columns $timeFieldNames which are incompatible " +
+                    "with Fabric. Dropping and recreating table '$tableIdentifier' with StringType."
+            }
+            // Also delete the stale _delta_log that Fabric created from the old schema.
+            // Without this, Fabric may use the cached (broken) Delta log instead of
+            // re-running XTable conversion on the new Iceberg table.
+            deleteStaleDeltaLog(table.location())
+            catalog.dropTable(tableIdentifier)
+            table = catalog.buildTable(tableIdentifier, incomingSchema)
+                .withProperty(DEFAULT_FILE_FORMAT, FileFormat.PARQUET.name.lowercase())
+                .create()
+            logger.info { "Table recreated with TIME columns converted to STRING for Fabric." }
+        }
+
         // Apply schema changes immediately. Since we write directly to the main branch
         // (no staging), schema changes must be committed before data is written.
         // For OVERWRITE mode on a freshly recreated table, this is a no-op (schemas already match).
@@ -327,9 +352,161 @@ class AzureOneLakeStreamLoader(
             }
         }
 
+        // Expire old snapshots and clean up metadata to keep Fabric's XTable happy.
+        // Fabric's auto-virtualization (Iceberg → Delta) reads the latest metadata.json
+        // which accumulates ALL historical snapshot references. With many snapshots (40+),
+        // Fabric fails with BlobNotFound when trying to resolve old manifest/data references.
+        // Expiring to keep only the current snapshot keeps the metadata compact.
+        expireOldSnapshots()
+
         logger.info {
             "teardown complete for stream ${stream.mappedDescriptor}. " +
                 "current-snapshot-id=${table.currentSnapshot()?.snapshotId() ?: "null"}"
+        }
+    }
+
+    /**
+     * Expire all snapshots except the current one and delete orphaned metadata files.
+     *
+     * Each flush() creates a new Iceberg snapshot, and without cleanup these accumulate
+     * indefinitely. The latest metadata.json contains references to ALL historical snapshots
+     * — with many snapshots (40+), Fabric's XTable auto-virtualization fails with BlobNotFound
+     * when trying to resolve old manifest/data references.
+     *
+     * After expiring snapshots, we also delete old metadata files (00000-*.metadata.json
+     * through 000(N-1)-*.metadata.json) since Iceberg's expireSnapshots() doesn't clean
+     * those up. Only the latest metadata file is needed for table discovery.
+     */
+    private fun expireOldSnapshots() {
+        try {
+            val currentSnapshot = table.currentSnapshot() ?: return
+            val snapshotCount = table.snapshots().count()
+            if (snapshotCount <= 1) {
+                logger.info { "Only $snapshotCount snapshot(s), no expiry needed for ${stream.mappedDescriptor}" }
+                return
+            }
+
+            logger.info {
+                "Expiring old snapshots for ${stream.mappedDescriptor}. " +
+                    "Current snapshot: ${currentSnapshot.snapshotId()}, total snapshots: $snapshotCount"
+            }
+
+            // Expire all snapshots older than NOW, keeping only the latest one.
+            // IMPORTANT: expireOlderThan(now) is required because Iceberg's default
+            // threshold is max-snapshot-age-ms (5 days), so recent snapshots would
+            // NOT be expired without this explicit override.
+            table.expireSnapshots()
+                .expireOlderThan(System.currentTimeMillis())
+                .retainLast(1)
+                .commit()
+
+            table.refresh()
+            val remainingCount = table.snapshots().count()
+            logger.info {
+                "Snapshot expiry complete for ${stream.mappedDescriptor}. " +
+                    "Remaining snapshots: $remainingCount"
+            }
+
+            // Delete old metadata files that are no longer referenced.
+            // Iceberg's expireSnapshots() removes old manifest/data files but does NOT
+            // delete the old metadata JSON files (00000-*, 00001-*, etc.).
+            // These accumulate in the metadata/ directory and can confuse Fabric's
+            // directory-listing-based metadata discovery.
+            deleteOrphanedMetadataFiles()
+        } catch (e: Exception) {
+            // Non-fatal: table still works, just has extra metadata history
+            logger.warn(e) {
+                "Failed to expire old snapshots for ${stream.mappedDescriptor}. " +
+                    "Table will continue to work but may have extra metadata history."
+            }
+        }
+    }
+
+    /**
+     * Delete old metadata JSON files that are no longer needed.
+     * Keeps only the metadata file with the highest version number.
+     *
+     * After expireSnapshots(), the current metadata.json is the only one needed.
+     * Old metadata files (00000-*.metadata.json, 00001-*, etc.) accumulate in the
+     * metadata/ directory and can confuse Fabric's directory-listing-based discovery.
+     */
+    private fun deleteOrphanedMetadataFiles() {
+        try {
+            val fileIO = table.io()
+            if (fileIO !is org.apache.iceberg.io.SupportsPrefixOperations) return
+
+            val metadataPrefix = table.location() + "/metadata/"
+            val allFiles = (fileIO as org.apache.iceberg.io.SupportsPrefixOperations)
+                .listPrefix(metadataPrefix)
+
+            // Collect all metadata.json files and find the one with the highest version
+            val metadataFiles = mutableListOf<String>()
+            var maxVersion = -1
+            var latestFile: String? = null
+
+            for (fileInfo in allFiles) {
+                val location = fileInfo.location()
+                if (!location.endsWith(".metadata.json")) continue
+                metadataFiles.add(location)
+
+                // Extract version number from NNNNN-uuid.metadata.json format
+                val match = METADATA_VERSION_PATTERN.find(location)
+                val version = match?.groupValues?.get(1)?.toIntOrNull() ?: -1
+                if (version > maxVersion) {
+                    maxVersion = version
+                    latestFile = location
+                }
+            }
+
+            if (latestFile == null || metadataFiles.size <= 1) return
+
+            var deletedCount = 0
+            for (file in metadataFiles) {
+                if (file == latestFile) continue
+                try {
+                    fileIO.deleteFile(file)
+                    deletedCount++
+                } catch (e: Exception) {
+                    logger.debug { "Could not delete old metadata file $file: ${e.message}" }
+                }
+            }
+
+            if (deletedCount > 0) {
+                logger.info { "Deleted $deletedCount orphaned metadata file(s) for ${stream.mappedDescriptor}" }
+            }
+        } catch (e: Exception) {
+            logger.debug(e) { "Failed to clean up orphaned metadata files for ${stream.mappedDescriptor}" }
+        }
+    }
+
+    /**
+     * Delete the _delta_log directory that Fabric's XTable auto-virtualization creates.
+     * When we need to recreate a table (e.g., to fix TIME column types), the stale
+     * _delta_log from the old table would prevent Fabric from re-running the XTable
+     * conversion on the new table.
+     */
+    private fun deleteStaleDeltaLog(tableLocation: String) {
+        try {
+            val fileIO = table.io()
+            if (fileIO !is org.apache.iceberg.io.SupportsPrefixOperations) return
+
+            val deltaLogPrefix = "$tableLocation/_delta_log/"
+            val files = (fileIO as org.apache.iceberg.io.SupportsPrefixOperations)
+                .listPrefix(deltaLogPrefix)
+            var deletedCount = 0
+            for (fileInfo in files) {
+                try {
+                    fileIO.deleteFile(fileInfo.location())
+                    deletedCount++
+                } catch (e: Exception) {
+                    logger.debug { "Could not delete _delta_log file ${fileInfo.location()}: ${e.message}" }
+                }
+            }
+            if (deletedCount > 0) {
+                logger.info { "Deleted $deletedCount stale _delta_log file(s) for ${stream.mappedDescriptor}" }
+            }
+        } catch (e: Exception) {
+            logger.debug(e) { "Failed to clean up _delta_log for ${stream.mappedDescriptor}" }
         }
     }
 
@@ -341,12 +518,19 @@ class AzureOneLakeStreamLoader(
         )
 
     companion object {
+        /** Matches standard Iceberg metadata naming: `NNNNN-uuid.metadata.json` */
+        private val METADATA_VERSION_PATTERN = Regex("""(\d{5})-[0-9a-f-]+\.metadata\.json$""")
+
         /**
          * Convert Iceberg schema for Fabric compatibility:
          * 1. TimestampType.withoutZone() → TimestampType.withZone()
          *    (Fabric XTable drops columns with isAdjustedToUTC=false)
          * 2. _airbyte_extracted_at LongType → TimestampType.withZone()
          *    (show as datetime2 instead of bigint epoch ms)
+         * 3. TimeType → StringType
+         *    (Delta Lake has no native TIME type; Fabric XTable fails to convert
+         *     Iceberg tables containing TimeType columns, resulting in empty
+         *     _delta_log and "Invalid object name" in the SQL endpoint)
          */
         fun convertTimestampsForFabric(schema: Schema): Schema {
             val identifierFieldIds = schema.identifierFieldIds()
@@ -377,6 +561,16 @@ class AzureOneLakeStreamLoader(
                         Types.NestedField.of(
                             field.fieldId(), field.isOptional, field.name(),
                             Types.TimestampType.withZone(), field.doc()
+                        )
+                    }
+                    // Convert TimeType to StringType — Delta Lake has no TIME type.
+                    // Fabric XTable silently fails the entire Iceberg → Delta conversion
+                    // when any column has TimeType, resulting in an empty _delta_log.
+                    field.type() is Types.TimeType -> {
+                        logger.info { "Converting ${field.name()} from TimeType to StringType for Fabric" }
+                        Types.NestedField.of(
+                            field.fieldId(), field.isOptional, field.name(),
+                            Types.StringType.get(), field.doc()
                         )
                     }
                     else -> field

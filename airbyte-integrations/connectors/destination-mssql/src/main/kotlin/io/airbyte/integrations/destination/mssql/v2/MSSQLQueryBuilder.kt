@@ -255,7 +255,7 @@ class MSSQLQueryBuilder(
         GET_EXISTING_SCHEMA_QUERY.executeQuery(connection, outputSchema, tableName) { rs ->
             while (rs.next()) {
                 val name = rs.getString("COLUMN_NAME")
-                val type = MssqlType.valueOf(rs.getString("DATA_TYPE").uppercase())
+                val type = MssqlType.fromSqlName(rs.getString("DATA_TYPE"))
                 fields.add(NamedSqlField(name, type))
             }
         }
@@ -273,6 +273,7 @@ class MSSQLQueryBuilder(
         val expectedFields = expectedSchema.associate { it.name to it.type }
 
         if (existingFields == expectedFields) {
+            logger.info { "updateSchema: schema matches for $outputSchema.$tableName, no changes needed" }
             return
         }
 
@@ -280,6 +281,8 @@ class MSSQLQueryBuilder(
         val toAdd = expectedFields.filter { it.key !in existingFields }
         val toAlter =
             expectedFields.filter { it.key in existingFields && it.value != existingFields[it.key] }
+
+        logger.info { "updateSchema for $outputSchema.$tableName: toDelete=${toDelete.keys}, toAdd=${toAdd.keys}, toAlter=${toAlter.map { "${it.key}: ${existingFields[it.key]} -> ${it.value}" }}" }
 
         val query =
             StringBuilder()

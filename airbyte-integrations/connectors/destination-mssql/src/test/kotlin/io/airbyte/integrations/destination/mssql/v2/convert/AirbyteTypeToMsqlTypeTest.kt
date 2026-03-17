@@ -138,7 +138,7 @@ class AirbyteTypeToMsqlTypeTest {
     fun testConvertTimestampTypeWithoutTimezone() {
         val timestampType = TimestampTypeWithoutTimezone
         val result = converter.convert(timestampType)
-        assertEquals(MssqlType.DATETIME, result)
+        assertEquals(MssqlType.DATETIME2, result)
     }
 
     @Test

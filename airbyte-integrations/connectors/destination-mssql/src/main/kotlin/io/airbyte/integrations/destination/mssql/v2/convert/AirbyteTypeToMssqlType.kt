@@ -38,9 +38,43 @@ enum class MssqlType(val sqlType: Int, val sqlStringOverride: String? = null) {
     VARCHAR_INDEX(Types.VARCHAR, sqlStringOverride = "VARCHAR(200)"),
     DATETIMEOFFSET(Types.TIMESTAMP_WITH_TIMEZONE),
     TIME(Types.TIME),
-    DATETIME(Types.TIMESTAMP);
+    /**
+     * Legacy DATETIME type — only used when reading existing schema from INFORMATION_SCHEMA.
+     * DATETIME supports 1753-01-01 to 9999-12-31 only.
+     * When updateSchema() compares existing DATETIME columns against expected DATETIME2,
+     * the mismatch triggers an ALTER COLUMN to upgrade them to DATETIME2.
+     * The sqlString here is "DATETIME" so that if it were ever used in DDL it would be correct,
+     * but in practice new/altered columns always use DATETIME2.
+     */
+    DATETIME(Types.TIMESTAMP, sqlStringOverride = "DATETIME"),
+    /**
+     * Use DATETIME2 instead of DATETIME because:
+     * - DATETIME2 supports dates from 0001-01-01 to 9999-12-31
+     *   (DATETIME only supports 1753-01-01 to 9999-12-31)
+     * - DATETIME2 has up to 7 fractional second digits (vs 3 for DATETIME)
+     * - Sources like Snowflake commonly send sentinel dates like 0001-01-01
+     *   which are out of range for DATETIME
+     */
+    DATETIME2(Types.TIMESTAMP, sqlStringOverride = "DATETIME2");
 
     val sqlString: String = sqlStringOverride ?: name
+
+    companion object {
+        /**
+         * Maps a SQL Server DATA_TYPE name (from INFORMATION_SCHEMA.COLUMNS) to a MssqlType.
+         * "datetime" maps to DATETIME (the legacy enum), NOT DATETIME2 — this ensures
+         * updateSchema() detects the mismatch and ALTERs legacy columns to DATETIME2.
+         * "datetime2" maps to DATETIME2 via valueOf().
+         */
+        fun fromSqlName(sqlName: String): MssqlType {
+            return try {
+                valueOf(sqlName.uppercase())
+            } catch (_: IllegalArgumentException) {
+                // Unknown types (e.g., "ntext", "image") → fallback to TEXT
+                TEXT
+            }
+        }
+    }
 }
 
 class AirbyteTypeToMssqlType {
@@ -59,7 +93,7 @@ class AirbyteTypeToMssqlType {
             is TimeTypeWithTimezone -> MssqlType.DATETIMEOFFSET
             is TimeTypeWithoutTimezone -> MssqlType.TIME
             is TimestampTypeWithTimezone -> MssqlType.DATETIMEOFFSET
-            is TimestampTypeWithoutTimezone -> MssqlType.DATETIME
+            is TimestampTypeWithoutTimezone -> MssqlType.DATETIME2
             is UnionType -> MssqlType.TEXT
             is UnknownType -> MssqlType.TEXT
         }

@@ -7,6 +7,8 @@ package io.airbyte.integrations.destination.azure_synapse.v2
 import io.airbyte.cdk.load.data.ArrayType
 import io.airbyte.cdk.load.data.BooleanType
 import io.airbyte.cdk.load.data.BooleanValue
+import io.airbyte.cdk.load.data.DateType
+import io.airbyte.cdk.load.data.DateValue
 import io.airbyte.cdk.load.data.EnrichedAirbyteValue
 import io.airbyte.cdk.load.data.IntegerType
 import io.airbyte.cdk.load.data.IntegerValue
@@ -15,6 +17,10 @@ import io.airbyte.cdk.load.data.NumberType
 import io.airbyte.cdk.load.data.NumberValue
 import io.airbyte.cdk.load.data.ObjectType
 import io.airbyte.cdk.load.data.StringValue
+import io.airbyte.cdk.load.data.TimeTypeWithTimezone
+import io.airbyte.cdk.load.data.TimeTypeWithoutTimezone
+import io.airbyte.cdk.load.data.TimeWithTimezoneValue
+import io.airbyte.cdk.load.data.TimeWithoutTimezoneValue
 import io.airbyte.cdk.load.data.TimestampTypeWithTimezone
 import io.airbyte.cdk.load.data.TimestampTypeWithoutTimezone
 import io.airbyte.cdk.load.data.TimestampWithTimezoneValue
@@ -28,6 +34,8 @@ import io.airbyte.protocol.models.v0.AirbyteRecordMessageMetaChange.Reason
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeFormatterBuilder
+import java.time.temporal.ChronoField
 
 object LIMITS {
     // Maximum value for BIGINT in Azure Synapse
@@ -76,47 +84,98 @@ object LIMITS {
  */
 class AzureSynapseCsvRowGenerator(private val validateValuesPreLoad: Boolean) {
 
+    companion object {
+        // Space separator (not 'T') required for Azure Synapse COPY INTO with DATETIME2 columns.
+        // Always includes seconds (HH:mm:ss) — Java ISO formatters omit when zero.
+        private val SYNAPSE_TIMESTAMP_FORMATTER: DateTimeFormatter =
+            DateTimeFormatterBuilder()
+                .appendPattern("yyyy-MM-dd HH:mm:ss")
+                .optionalStart()
+                .appendFraction(ChronoField.NANO_OF_SECOND, 0, 7, true)
+                .optionalEnd()
+                .toFormatter()
+
+        private val SYNAPSE_TIMESTAMP_TZ_FORMATTER: DateTimeFormatter =
+            DateTimeFormatterBuilder()
+                .appendPattern("yyyy-MM-dd HH:mm:ss")
+                .optionalStart()
+                .appendFraction(ChronoField.NANO_OF_SECOND, 0, 7, true)
+                .optionalEnd()
+                .appendPattern(" ")
+                .appendOffsetId()
+                .toFormatter()
+
+        private val SYNAPSE_TIME_FORMATTER: DateTimeFormatter =
+            DateTimeFormatterBuilder()
+                .appendPattern("HH:mm:ss")
+                .optionalStart()
+                .appendFraction(ChronoField.NANO_OF_SECOND, 0, 7, true)
+                .optionalEnd()
+                .toFormatter()
+
+        private val SYNAPSE_TIME_TZ_FORMATTER: DateTimeFormatter =
+            DateTimeFormatterBuilder()
+                .appendPattern("HH:mm:ss")
+                .optionalStart()
+                .appendFraction(ChronoField.NANO_OF_SECOND, 0, 7, true)
+                .optionalEnd()
+                .appendPattern(" ")
+                .appendOffsetId()
+                .toFormatter()
+    }
+
     fun generate(record: DestinationRecordRaw, schema: ObjectType): List<Any> {
         val enrichedRecord = record.asEnrichedDestinationRecordAirbyteValue()
 
-        if (validateValuesPreLoad) {
-            enrichedRecord.declaredFields.values.forEach { value ->
-                if (value.abValue is NullValue) {
-                    return@forEach
-                }
-                val actualValue = value.abValue
-                when (value.type) {
-                    // Enforce numeric range
-                    is IntegerType -> LIMITS.validateInteger(value)
-                    is NumberType -> LIMITS.validateNumber(value)
-
-                    // Azure Synapse expects booleans as 0 or 1
-                    is BooleanType ->
-                        value.abValue =
-                            if ((actualValue as BooleanValue).value) LIMITS.TRUE else LIMITS.FALSE
-
-                    // Azure Synapse requires a specific timestamp format
-                    is TimestampTypeWithTimezone ->
-                        value.abValue =
-                            StringValue(
-                                (actualValue as TimestampWithTimezoneValue)
-                                    .value
-                                    .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
-                            )
-                    is TimestampTypeWithoutTimezone ->
-                        value.abValue =
-                            StringValue(
-                                (actualValue as TimestampWithoutTimezoneValue)
-                                    .value
-                                    .format(DateTimeFormatter.ISO_DATE_TIME)
-                            )
-
-                    // serialize complex types to string
-                    is ArrayType,
-                    is ObjectType,
-                    is UnionType,
-                    is UnknownType -> value.abValue = StringValue(actualValue.serializeToString())
-                    else -> {}
+        // Always format booleans, timestamps, dates, and times for Azure Synapse compatibility.
+        // These conversions MUST run regardless of validateValuesPreLoad because:
+        // - BIT columns require 0/1, not "true"/"false"
+        // - DATETIME2/DATETIMEOFFSET columns require space-separated timestamps with seconds
+        // - Java's default toString() uses 'T' separator and may omit seconds
+        enrichedRecord.declaredFields.values.forEach { value ->
+            if (value.abValue is NullValue) {
+                return@forEach
+            }
+            val actualValue = value.abValue
+            when (value.type) {
+                is BooleanType ->
+                    value.abValue =
+                        if ((actualValue as BooleanValue).value) LIMITS.TRUE else LIMITS.FALSE
+                is TimestampTypeWithTimezone ->
+                    value.abValue = StringValue(
+                        (actualValue as TimestampWithTimezoneValue)
+                            .value.format(SYNAPSE_TIMESTAMP_TZ_FORMATTER)
+                    )
+                is TimestampTypeWithoutTimezone ->
+                    value.abValue = StringValue(
+                        (actualValue as TimestampWithoutTimezoneValue)
+                            .value.format(SYNAPSE_TIMESTAMP_FORMATTER)
+                    )
+                is DateType ->
+                    value.abValue = StringValue((actualValue as DateValue).value.toString())
+                is TimeTypeWithoutTimezone ->
+                    value.abValue = StringValue(
+                        (actualValue as TimeWithoutTimezoneValue)
+                            .value.format(SYNAPSE_TIME_FORMATTER)
+                    )
+                is TimeTypeWithTimezone ->
+                    value.abValue = StringValue(
+                        (actualValue as TimeWithTimezoneValue)
+                            .value.format(SYNAPSE_TIME_TZ_FORMATTER)
+                    )
+                else -> {
+                    if (validateValuesPreLoad) {
+                        when (value.type) {
+                            is IntegerType -> LIMITS.validateInteger(value)
+                            is NumberType -> LIMITS.validateNumber(value)
+                            is ArrayType,
+                            is ObjectType,
+                            is UnionType,
+                            is UnknownType ->
+                                value.abValue = StringValue(actualValue.serializeToString())
+                            else -> {}
+                        }
+                    }
                 }
             }
         }
