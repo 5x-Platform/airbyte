@@ -61,14 +61,14 @@ class AzureOneLakeStreamLoader(
     // These need value conversion (NumberValue → IntegerValue) in the Aggregate,
     // because the CDK's value converter always maps NumberValue → Double which is
     // incompatible with LongType columns in Parquet.
-    private val pkFieldsConvertedToLong: Set<String>
+    private var pkFieldsConvertedToLong: Set<String>
 
     // Build the incoming schema, but fix primary key fields that are Double/Float.
     // Iceberg forbids float/double as identifier fields (needed for equality-delete in Dedupe mode).
     // Sources like Snowflake report NUMBER columns as NumberType → DoubleType, but PKs (e.g.,
     // C_CUSTKEY, O_ORDERKEY) are almost always integers. We map PK double/float fields to LongType
     // so they can be used as identifier fields.
-    private val incomingSchema: Schema
+    private var incomingSchema: Schema
 
     init {
         val baseSchema = icebergUtil.toIcebergSchema(stream = stream)
@@ -144,6 +144,43 @@ class AzureOneLakeStreamLoader(
                 schema = incomingSchema
             )
 
+        // For non-Dedupe modes (e.g., Overwrite during clear/reset), the init block
+        // couldn't detect PK fields because importType wasn't Dedupe. Now that the table
+        // is loaded, check if the existing table has Long identifier fields that the
+        // incomingSchema has as Double. If so, apply the same PK fix to incomingSchema
+        // to prevent type ping-pong (Overwrite creates double → next Dedupe can't evolve to long).
+        if (pkFieldsConvertedToLong.isEmpty() && stream.tableSchema.importType !is Dedupe) {
+            val existingIdentifierNames = table.schema().identifierFieldIds()
+                .mapNotNull { fieldId -> table.schema().findField(fieldId)?.name() }
+                .toSet()
+            val fieldsNeedingFix = existingIdentifierNames.filter { fieldName ->
+                val incomingField = incomingSchema.columns().find { it.name() == fieldName }
+                val existingField = table.schema().findField(fieldName)
+                existingField?.type() is Types.LongType &&
+                    (incomingField?.type() is Types.DoubleType || incomingField?.type() is Types.FloatType)
+            }.toSet()
+            if (fieldsNeedingFix.isNotEmpty()) {
+                logger.info {
+                    "Non-Dedupe mode: applying PK Long fix for fields $fieldsNeedingFix " +
+                        "(existing table has Long, incoming has Double)."
+                }
+                val identifierFieldIds = mutableSetOf<Int>()
+                val fixedFields = incomingSchema.columns().map { field ->
+                    if (field.name() in fieldsNeedingFix) {
+                        identifierFieldIds.add(field.fieldId())
+                        Types.NestedField.of(
+                            field.fieldId(), false, field.name(),
+                            Types.LongType.get(), field.doc()
+                        )
+                    } else {
+                        field
+                    }
+                }
+                incomingSchema = Schema(fixedFields, identifierFieldIds)
+                pkFieldsConvertedToLong = fieldsNeedingFix
+            }
+        }
+
         // For Dedupe streams on FIRST sync (empty table), drop and recreate to ensure:
         // 1. Clean schema with PK fields as LongType (not DoubleType from Snowflake NUMBER)
         // 2. Identifier fields properly set for equality-delete writers
@@ -209,13 +246,62 @@ class AzureOneLakeStreamLoader(
                 existingField != null && existingField.type() != incomingField.type()
             }.map { it.name() }
             if (typeMismatches.isNotEmpty()) {
+                // Check if the existing table had identifier fields (from a previous Dedupe sync).
+                // If so, apply the PK double→long fix to the incoming schema before recreating.
+                // This prevents type ping-pong: OVERWRITE creates table with double for PK fields,
+                // then next Dedupe sync fails because double→long schema evolution is not allowed.
+                val existingIdentifierNames = existingSchema.identifierFieldIds()
+                    .mapNotNull { fieldId -> existingSchema.findField(fieldId)?.name() }
+                    .toSet()
+                // For type-mismatched columns where the existing table has LongType
+                // and the incoming schema has DoubleType, preserve LongType.
+                // This happens when the previous Dedupe sync converted PK double→long,
+                // and now an OVERWRITE/clear reset tries to recreate with double.
+                // Without this fix, the next Dedupe sync would fail because
+                // double→long schema evolution is not allowed in Iceberg.
+                val existingLongFields = typeMismatches.filter { fieldName ->
+                    val existingField = existingSchema.findField(fieldName)
+                    val incomingField = incomingSchema.columns().find { it.name() == fieldName }
+                    existingField?.type() is Types.LongType &&
+                        (incomingField?.type() is Types.DoubleType || incomingField?.type() is Types.FloatType)
+                }.toSet()
+
+                val recreateSchema = if (existingLongFields.isNotEmpty()) {
+                    // Build identifier field IDs from the INCOMING schema's fields
+                    // (not the existing schema, which may have different field IDs)
+                    val identifierFieldIds = mutableSetOf<Int>()
+                    val fixedFields = incomingSchema.columns().map { field ->
+                        if (field.name() in existingLongFields) {
+                            identifierFieldIds.add(field.fieldId())
+                            Types.NestedField.of(
+                                field.fieldId(), false, field.name(),
+                                Types.LongType.get(), field.doc()
+                            )
+                        } else {
+                            field
+                        }
+                    }
+                    logger.info {
+                        "Preserving LongType for fields $existingLongFields " +
+                            "(were Long in existing table, Double in incoming schema) " +
+                            "during OVERWRITE table recreation."
+                    }
+                    Schema(fixedFields, identifierFieldIds)
+                } else {
+                    incomingSchema
+                }
+
+                // Update incomingSchema so the schema synchronizer (computeOrExecuteSchemaUpdate)
+                // sees matching schemas and doesn't try to reconcile double↔long mismatches.
+                incomingSchema = recreateSchema
+
                 val tableIdentifier = tableIdGenerator.toTableIdentifier(stream.mappedDescriptor)
                 logger.info {
                     "OVERWRITE stream has type mismatches for columns $typeMismatches. " +
-                        "Dropping and recreating table '$tableIdentifier' with incoming schema."
+                        "Dropping and recreating table '$tableIdentifier' with corrected schema."
                 }
                 catalog.dropTable(tableIdentifier)
-                table = catalog.buildTable(tableIdentifier, incomingSchema)
+                table = catalog.buildTable(tableIdentifier, recreateSchema)
                     .withProperty(DEFAULT_FILE_FORMAT, FileFormat.PARQUET.name.lowercase())
                     .create()
                 logger.info { "Table recreated for OVERWRITE stream with correct schema." }

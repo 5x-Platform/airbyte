@@ -28,6 +28,16 @@ interface JdbcSourceConfiguration : SourceConfiguration {
         get() = emptyList()
 
     /**
+     * Controls whether the cursor lower bound in incremental syncs uses >= (inclusive)
+     * or > (exclusive). Default is true (>=) for backward compatibility, which may
+     * re-read the last row from the previous sync. Connectors with high-precision
+     * cursor columns (e.g. timestamps with milliseconds) can set this to false
+     * to use strict > and avoid re-reading already-synced rows.
+     */
+    val cursorLowerBoundInclusive: Boolean
+        get() = true
+
+    /**
      * Micronaut factory which glues [ConfigurationSpecificationSupplier] and
      * [SourceConfigurationFactory] together to produce a [JdbcSourceConfiguration] singleton.
      */

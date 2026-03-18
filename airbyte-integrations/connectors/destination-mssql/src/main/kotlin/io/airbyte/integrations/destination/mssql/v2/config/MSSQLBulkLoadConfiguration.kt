@@ -27,7 +27,9 @@ class MSSQLIsConfiguredForBulkLoad : Condition {
 class MSSQLIsNotConfiguredForBulkLoad : Condition {
     override fun matches(context: ConditionContext<*>): Boolean {
         val config = context.beanContext.getBean(MSSQLConfiguration::class.java)
-        return config.mssqlLoadTypeConfiguration.loadTypeConfiguration !is BulkLoadConfiguration
+        // Only activate the direct (INSERT) loader when explicitly configured for INSERT mode.
+        // Both BULK and BULK_COPY modes have their own loaders.
+        return config.mssqlLoadTypeConfiguration.loadTypeConfiguration is InsertLoadTypeConfiguration
     }
 }
 

@@ -118,12 +118,17 @@ class DefaultJdbcPartitionFactory(
                 null
             } else {
                 // Incremental ongoing.
+                // isLowerBoundIncluded controls whether the cursor boundary uses >= or >.
+                // Default is true (>=) for backward compatibility. Connectors can set
+                // cursorLowerBoundInclusive=false in their configuration to use strict >
+                // when cursor columns have sufficient precision (e.g. timestamps with
+                // milliseconds) to avoid re-reading the last row from the previous sync.
                 DefaultJdbcCursorIncrementalPartition(
                     selectQueryGenerator,
                     streamState,
                     cursor,
                     cursorLowerBound = cursorCheckpoint,
-                    isLowerBoundIncluded = true,
+                    isLowerBoundIncluded = configuration.cursorLowerBoundInclusive,
                     cursorUpperBound = streamState.cursorUpperBound,
                 )
             }
@@ -277,7 +282,10 @@ class DefaultJdbcPartitionFactory(
                 streamState,
                 cursor,
                 lowerBound,
-                isLowerBoundIncluded = idx == 0,
+                // First split inherits the cursor boundary behavior from config;
+                // subsequent splits always use strict > since their boundaries
+                // are internal split points, not sync checkpoints.
+                isLowerBoundIncluded = idx == 0 && configuration.cursorLowerBoundInclusive,
                 upperBound,
             )
         }

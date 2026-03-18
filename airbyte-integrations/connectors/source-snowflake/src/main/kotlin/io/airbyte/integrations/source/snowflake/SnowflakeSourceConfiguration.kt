@@ -43,6 +43,10 @@ data class SnowflakeSourceConfiguration(
         when (incremental) {
             UserDefinedCursorIncrementalConfiguration -> null
         }
+
+    // Snowflake timestamps have microsecond precision, so strict > is safe
+    // and avoids re-reading the last row from the previous sync.
+    override val cursorLowerBoundInclusive: Boolean = false
 }
 
 sealed interface IncrementalConfiguration

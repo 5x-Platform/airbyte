@@ -30,6 +30,10 @@ private val logger = KotlinLogging.logger {}
  * Fabric's SQL endpoint. The Iceberg namespace is retained in table metadata but does
  * not appear in the physical directory structure.
  *
+ * When [namespacePrefixEnabled] is true, the namespace is prepended to the table name
+ * with an underscore separator (e.g. `ravi_PRODUCT_CATALOG`). This prevents table name
+ * collisions when syncing from multiple source schemas, similar to Fivetran's behavior.
+ *
  * Table metadata follows the standard Iceberg layout:
  * ```
  * <warehouse>/<table>/metadata/v<N>.metadata.json
@@ -44,13 +48,21 @@ class FileIOCatalog : BaseMetastoreCatalog(), Closeable, SupportsNamespaces {
     private lateinit var catalogName: String
     private lateinit var warehouseLocation: String
     private lateinit var fileIO: FileIO
+    private var namespacePrefixEnabled: Boolean = false
 
-    fun initialize(name: String, warehouseLocation: String, fileIO: FileIO) {
+    fun initialize(
+        name: String,
+        warehouseLocation: String,
+        fileIO: FileIO,
+        namespacePrefixEnabled: Boolean = false
+    ) {
         this.catalogName = name
         this.warehouseLocation = warehouseLocation.trimEnd('/')
         this.fileIO = fileIO
+        this.namespacePrefixEnabled = namespacePrefixEnabled
         logger.info {
-            "Initialized FileIOCatalog '$name' with warehouse at $warehouseLocation"
+            "Initialized FileIOCatalog '$name' with warehouse at $warehouseLocation" +
+                " (namespacePrefixEnabled=$namespacePrefixEnabled)"
         }
     }
 
@@ -66,7 +78,17 @@ class FileIOCatalog : BaseMetastoreCatalog(), Closeable, SupportsNamespaces {
         // Fabric's metadata virtualization requires Iceberg table folders to be
         // directly under the Tables directory to auto-generate Delta Lake metadata.
         // The Iceberg namespace is preserved in the table metadata internally.
-        return "$warehouseLocation/${tableIdentifier.name()}"
+        //
+        // When namespacePrefixEnabled is true, prepend the namespace to the table name
+        // with an underscore separator to prevent collisions across source schemas.
+        // e.g. namespace="ravi", table="PRODUCT_CATALOG" -> "ravi_PRODUCT_CATALOG"
+        val tableName = if (namespacePrefixEnabled && tableIdentifier.hasNamespace()) {
+            val ns = tableIdentifier.namespace().level(0)
+            "${ns}_${tableIdentifier.name()}"
+        } else {
+            tableIdentifier.name()
+        }
+        return "$warehouseLocation/$tableName"
     }
 
     override fun listTables(namespace: Namespace): List<TableIdentifier> {

@@ -100,7 +100,8 @@ class AzureOneLakeCatalogUtil(
                 catalog.initialize(
                     name,
                     config.azureOneLakeCatalogConfiguration.warehouseLocation,
-                    fileIO
+                    fileIO,
+                    namespacePrefixEnabled = config.namespacePrefixEnabled
                 )
                 catalog
             }

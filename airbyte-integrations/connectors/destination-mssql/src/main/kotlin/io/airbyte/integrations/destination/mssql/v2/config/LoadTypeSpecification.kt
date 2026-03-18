@@ -47,6 +47,7 @@ interface LoadTypeSpecification {
                     )
                 }
                 is InsertLoadSpecification -> InsertLoadTypeConfiguration()
+                is BulkCopyLoadSpecification -> BulkCopyLoadTypeConfiguration()
             }
         return MSSQLLoadTypeConfiguration(loadTypeConfig)
     }
@@ -65,6 +66,7 @@ interface LoadTypeSpecification {
 @JsonSubTypes(
     JsonSubTypes.Type(value = InsertLoadSpecification::class, name = "INSERT"),
     JsonSubTypes.Type(value = BulkLoadSpecification::class, name = "BULK"),
+    JsonSubTypes.Type(value = BulkCopyLoadSpecification::class, name = "BULK_COPY"),
 )
 @JsonSchemaTitle("MSSQL Load Type")
 @JsonSchemaDescription(
@@ -72,10 +74,11 @@ interface LoadTypeSpecification {
 )
 sealed class LoadType(@JsonSchemaTitle("Load Type") open val loadType: Type) {
 
-    /** Enum of possible load operations in MSSQL: INSERT or BULK. */
+    /** Enum of possible load operations in MSSQL: INSERT, BULK, or BULK_COPY. */
     enum class Type(@get:JsonValue val loadTypeName: String) {
         INSERT("INSERT"),
-        BULK("BULK")
+        BULK("BULK"),
+        BULK_COPY("BULK_COPY")
     }
 }
 
@@ -197,6 +200,25 @@ class BulkLoadSpecification(
 }
 
 /**
+ * Configuration for the BULK_COPY load mechanism, using JDBC SQLServerBulkCopy.
+ * This uses the mssql-jdbc driver's built-in bulk copy API to stream data directly
+ * from the JVM to SQL Server via the TDS protocol, similar to how Fivetran loads data.
+ * No Azure Blob Storage or external data source is required.
+ */
+@JsonSchemaTitle("Bulk Copy (JDBC)")
+@JsonSchemaDescription(
+    "Uses the JDBC SQLServerBulkCopy API to load data directly into SQL Server " +
+        "without requiring Azure Blob Storage. This is similar to how Fivetran loads data. " +
+        "No external data source configuration is needed in SQL Server."
+)
+class BulkCopyLoadSpecification(
+    @JsonSchemaTitle("Load Type")
+    @JsonProperty("load_type")
+    @JsonSchemaInject(json = """{"order": 0}""")
+    override val loadType: Type = Type.BULK_COPY,
+) : LoadType(loadType)
+
+/**
  * A marker interface for classes that hold the load configuration details. This helps unify both
  * `InsertLoadTypeConfiguration` and `BulkLoadConfiguration`.
  */
@@ -230,6 +252,11 @@ data class BulkLoadConfiguration(
     val bulkLoadDataSource: String,
     val validateValuesPreLoad: Boolean?
 ) : LoadTypeConfiguration
+
+/** Configuration for the BULK_COPY load approach. Minimal — no external storage needed. */
+@JsonSchemaTitle("BULK_COPY Load Configuration")
+@JsonSchemaDescription("JDBC Bulk Copy configuration for MSSQL. No external storage required.")
+data class BulkCopyLoadTypeConfiguration(val ignored: String = "") : LoadTypeConfiguration
 
 /**
  * Provides an MSSQLLoadTypeConfiguration, typically used by higher-level components that need to

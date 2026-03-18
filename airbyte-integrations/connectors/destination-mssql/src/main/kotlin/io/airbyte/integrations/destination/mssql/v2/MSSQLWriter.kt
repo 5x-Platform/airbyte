@@ -11,6 +11,7 @@ import io.airbyte.cdk.load.write.DestinationWriter
 import io.airbyte.cdk.load.write.StreamLoader
 import io.airbyte.cdk.load.write.StreamStateStore
 import io.airbyte.integrations.destination.mssql.v2.config.AzureBlobStorageClientCreator
+import io.airbyte.integrations.destination.mssql.v2.config.BulkCopyLoadTypeConfiguration
 import io.airbyte.integrations.destination.mssql.v2.config.BulkLoadConfiguration
 import io.airbyte.integrations.destination.mssql.v2.config.InsertLoadTypeConfiguration
 import io.airbyte.integrations.destination.mssql.v2.config.MSSQLConfiguration
@@ -59,6 +60,14 @@ class MSSQLWriter(
                 MSSQLStreamLoader(
                     dataSource = dataSourceNotNull,
                     stream = stream,
+                    sqlBuilder = sqlBuilder,
+                    streamStateStore = streamStateStore
+                )
+            }
+            is BulkCopyLoadTypeConfiguration -> {
+                MSSQLBulkCopyStreamLoader(
+                    stream = stream,
+                    dataSource = dataSourceNotNull,
                     sqlBuilder = sqlBuilder,
                     streamStateStore = streamStateStore
                 )

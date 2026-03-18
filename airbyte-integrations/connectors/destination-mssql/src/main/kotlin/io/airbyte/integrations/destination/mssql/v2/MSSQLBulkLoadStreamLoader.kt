@@ -78,3 +78,9 @@ data class MSSQLDirectLoaderStreamState(
     override val dataSource: DataSource,
     val sqlBuilder: MSSQLQueryBuilder
 ) : MSSQLStreamState
+
+data class MSSQLBulkCopyStreamState(
+    override val dataSource: DataSource,
+    val sqlBuilder: MSSQLQueryBuilder,
+    val stream: io.airbyte.cdk.load.command.DestinationStream
+) : MSSQLStreamState

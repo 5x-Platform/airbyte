@@ -109,12 +109,20 @@ class AzureOneLakeSpecification : ConfigurationSpecification() {
     @get:JsonSchemaInject(json = """{"examples": ["dbo", "public"], "order": 11, "always_show": false, "default": "dbo"}""")
     val namespace: String = "dbo"
 
+    @get:JsonSchemaTitle("Namespace Prefix")
+    @get:JsonPropertyDescription(
+        """When enabled, the namespace (schema) is prepended to the table name with an underscore separator in the physical OneLake path. For example, a table "PRODUCT_CATALOG" in namespace "ravi" becomes "ravi_PRODUCT_CATALOG" under /Tables/. This prevents table name collisions when syncing from multiple source schemas. Similar to Fivetran's schema prefix behavior. Default is disabled for backward compatibility."""
+    )
+    @get:JsonProperty("namespace_prefix_enabled")
+    @get:JsonSchemaInject(json = """{"order": 12, "always_show": false, "default": false}""")
+    val namespacePrefixEnabled: Boolean = false
+
     @get:JsonSchemaTitle("Catalog Type")
     @get:JsonPropertyDescription(
         """Advanced: The Iceberg catalog implementation. Default "OneLake REST" uses Microsoft's native Iceberg REST Catalog API — the same approach Fivetran uses internally. Only change to "Polaris" if your organization runs an Apache Polaris catalog server."""
     )
     @get:JsonProperty("catalog_type")
-    @get:JsonSchemaInject(json = """{"order": 12, "always_show": false}""")
+    @get:JsonSchemaInject(json = """{"order": 13, "always_show": false}""")
     val catalogType: AzureOneLakeCatalogType =
         OneLakeRestCatalogSpec()
 

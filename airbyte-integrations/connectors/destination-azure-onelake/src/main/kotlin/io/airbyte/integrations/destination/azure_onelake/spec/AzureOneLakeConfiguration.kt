@@ -29,6 +29,7 @@ data class AzureOneLakeConfiguration(
     val lakehouseGuid: String,
     val lakehouseName: String,
     val namespace: String,
+    val namespacePrefixEnabled: Boolean = false,
     val azureOneLakeCatalogConfiguration: AzureOneLakeCatalogConfiguration,
 ) : DestinationConfiguration() {
 
@@ -80,6 +81,7 @@ class AzureOneLakeConfigurationFactory :
             lakehouseGuid = pojo.lakehouseGuid,
             lakehouseName = pojo.lakehouseName,
             namespace = pojo.namespace,
+            namespacePrefixEnabled = pojo.namespacePrefixEnabled,
             azureOneLakeCatalogConfiguration = pojo.toAzureOneLakeCatalogConfiguration(),
         )
     }
