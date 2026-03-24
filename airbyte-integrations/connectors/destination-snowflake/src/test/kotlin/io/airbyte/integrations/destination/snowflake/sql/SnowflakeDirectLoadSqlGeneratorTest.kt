@@ -682,20 +682,24 @@ internal class SnowflakeDirectLoadSqlGeneratorTest {
             "Expected _AB_CDC_DELETED_AT to be updated directly, but got:\n$sql"
         }
 
-        // Dedup query should carry forward data from non-delete rows to delete rows
-        // by joining with best_non_delete CTE
-        assert(sql.contains("best_non_delete")) {
-            "Expected dedup query to include best_non_delete CTE for carrying forward data columns, but got:\n$sql"
+        // Dedup query should use LAG() IGNORE NULLS to carry forward data from non-delete rows
+        // to delete rows in a single pass (no LEFT JOIN or extra CTEs)
+        assert(sql.contains("LAG") && sql.contains("IGNORE NULLS")) {
+            "Expected dedup query to use LAG() IGNORE NULLS for carrying forward data columns, but got:\n$sql"
         }
-        assert(sql.contains("non_delete_numbered")) {
-            "Expected dedup query to include non_delete_numbered CTE, but got:\n$sql"
+        assert(sql.contains("QUALIFY ROW_NUMBER()")) {
+            "Expected dedup query to use QUALIFY ROW_NUMBER() for single-pass dedup, but got:\n$sql"
         }
-        assert(sql.contains("LEFT JOIN best_non_delete nd")) {
-            "Expected dedup query to LEFT JOIN best_non_delete for data carry-forward, but got:\n$sql"
+        // Should NOT have the old CTE-based approach
+        assert(!sql.contains("best_non_delete")) {
+            "Expected dedup query to NOT use best_non_delete CTE (replaced by LAG), but got:\n$sql"
         }
-        // Data columns in dedup SELECT should use CASE WHEN to pick from non-delete when available
-        assert(sql.contains("""CASE WHEN d."_AB_CDC_DELETED_AT" IS NOT NULL AND nd."ID" IS NOT NULL THEN nd."ID" ELSE d."ID" END AS "ID"""")) {
-            "Expected dedup SELECT to carry forward ID from non-delete rows, but got:\n$sql"
+        assert(!sql.contains("LEFT JOIN")) {
+            "Expected dedup query to NOT use LEFT JOIN (replaced by LAG), but got:\n$sql"
+        }
+        // Data columns in dedup SELECT should use CASE WHEN + LAG for carry-forward
+        assert(sql.contains("""WHEN "_AB_CDC_DELETED_AT" IS NOT NULL""")) {
+            "Expected dedup SELECT to check _AB_CDC_DELETED_AT for LAG carry-forward, but got:\n$sql"
         }
     }
 

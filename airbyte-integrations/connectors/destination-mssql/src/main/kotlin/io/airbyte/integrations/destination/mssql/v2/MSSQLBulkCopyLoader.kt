@@ -127,7 +127,9 @@ class MSSQLBulkCopyLoader(
                 "[${sqlBuilder.outputSchema}].[${sqlBuilder.tableName}]"
 
             val bulkRecord = AirbyteBulkRecord(sqlBuilder, enrichedRecords)
+            log.info { "finishAppend: about to writeToServer for ${enrichedRecords.size} records to ${sqlBuilder.outputSchema}.${sqlBuilder.tableName}" }
             bulkCopy.writeToServer(bulkRecord)
+            log.info { "finishAppend: writeToServer completed successfully" }
             bulkCopy.close()
 
             if (sqlBuilder.hasCdc) {
@@ -176,7 +178,9 @@ class MSSQLBulkCopyLoader(
                 bulkCopy.destinationTableName = "[$tempTableName]"
 
                 val bulkRecord = AirbyteBulkRecord(sqlBuilder, enrichedRecords)
+                log.info { "finishWithDedup: about to writeToServer for ${enrichedRecords.size} records to temp table $tempTableName" }
                 bulkCopy.writeToServer(bulkRecord)
+                log.info { "finishWithDedup: writeToServer completed successfully" }
                 bulkCopy.close()
                 log.info { "Bulk copied ${enrichedRecords.size} records into temp table $tempTableName" }
 
@@ -250,12 +254,23 @@ class AirbyteBulkRecord(
     private val records: List<EnrichedDestinationRecordAirbyteValue>,
 ) : ISQLServerBulkRecord {
 
+    private val log = KotlinLogging.logger {}
     private var currentIndex = -1
     private val columns = sqlBuilder.finalTableSchema
     private val typeConverter = AirbyteTypeToMssqlType()
 
     // Column ordinals are 1-based
     private val columnOrdinals: Set<Int> = (1..columns.size).toSet()
+
+    init {
+        // Log column metadata at construction time so we can verify the deployed type mapping
+        log.info { "AirbyteBulkRecord: column count=${columns.size}, columns=[${
+            columns.mapIndexed { idx, field ->
+                val mssqlType = typeConverter.convert(field.type.type)
+                "${field.name}(airbyteType=${field.type.type::class.simpleName}, mssqlType=${mssqlType.name}, sqlTypeCode=${mssqlType.sqlType})"
+            }.joinToString(", ")
+        }]" }
+    }
 
     override fun getColumnOrdinals(): Set<Int> = columnOrdinals
 
@@ -271,11 +286,11 @@ class AirbyteBulkRecord(
             java.sql.Types.LONGVARCHAR, java.sql.Types.VARCHAR -> 0 // MAX
             java.sql.Types.BIGINT -> 19
             java.sql.Types.DECIMAL -> 38
-            java.sql.Types.BOOLEAN -> 1
+            java.sql.Types.BIT -> 1
             java.sql.Types.DATE -> 10
             java.sql.Types.TIME -> 16
             java.sql.Types.TIMESTAMP -> 27
-            java.sql.Types.TIMESTAMP_WITH_TIMEZONE -> 34
+            microsoft.sql.Types.DATETIMEOFFSET -> 34
             else -> 0
         }
     }
@@ -284,7 +299,7 @@ class AirbyteBulkRecord(
         return when (getColumnType(column)) {
             java.sql.Types.DECIMAL -> 8
             java.sql.Types.TIME, java.sql.Types.TIMESTAMP,
-            java.sql.Types.TIMESTAMP_WITH_TIMEZONE -> 7
+            microsoft.sql.Types.DATETIMEOFFSET -> 7
             else -> 0
         }
     }
@@ -312,12 +327,32 @@ class AirbyteBulkRecord(
         // No-op: column metadata is derived from the schema via getter methods.
     }
 
-    // Timestamp/time format setters — no-op since we format values ourselves in enrichedValueToJdbcValue
-    override fun setTimestampWithTimezoneFormat(format: String?) {}
-    override fun setTimestampWithTimezoneFormat(formatter: DateTimeFormatter?) {}
-    override fun setTimeWithTimezoneFormat(format: String?) {}
-    override fun setTimeWithTimezoneFormat(formatter: DateTimeFormatter?) {}
-    override fun getColumnDateTimeFormatter(column: Int): DateTimeFormatter? = null
+    // Store formatters so the bulk copy driver can parse our String values for temporal columns.
+    private var timestampWithTimezoneFormatter: DateTimeFormatter? = TIMESTAMP_TZ_FORMAT
+    private var timeWithTimezoneFormatter: DateTimeFormatter? = TIME_TZ_FORMAT
+
+    override fun setTimestampWithTimezoneFormat(format: String?) {
+        timestampWithTimezoneFormatter = format?.let { DateTimeFormatter.ofPattern(it) }
+    }
+    override fun setTimestampWithTimezoneFormat(formatter: DateTimeFormatter?) {
+        timestampWithTimezoneFormatter = formatter
+    }
+    override fun setTimeWithTimezoneFormat(format: String?) {
+        timeWithTimezoneFormatter = format?.let { DateTimeFormatter.ofPattern(it) }
+    }
+    override fun setTimeWithTimezoneFormat(formatter: DateTimeFormatter?) {
+        timeWithTimezoneFormatter = formatter
+    }
+
+    override fun getColumnDateTimeFormatter(column: Int): DateTimeFormatter? {
+        return when (getColumnType(column)) {
+            microsoft.sql.Types.DATETIMEOFFSET -> timestampWithTimezoneFormatter
+            java.sql.Types.TIMESTAMP -> TIMESTAMP_FORMAT
+            java.sql.Types.TIME -> TIME_FORMAT
+            java.sql.Types.DATE -> DATE_FORMAT
+            else -> null
+        }
+    }
 
     override fun getRowData(): Array<Any?> {
         val enrichedRecord = records[currentIndex]
@@ -350,10 +385,18 @@ class AirbyteBulkRecord(
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSSS XXX")
         private val TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss.SSSSSSS")
         private val TIME_TZ_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss.SSSSSSS XXX")
+        private val DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd")
     }
 
     /**
      * Converts an EnrichedAirbyteValue to a Java object suitable for SQLServerBulkCopy.
+     *
+     * SQLServerBulkCopy uses getColumnDateTimeFormatter() to parse String values for
+     * temporal columns. We return formatted Strings here and provide matching formatters
+     * via getColumnDateTimeFormatter().
+     *
+     * - BIT columns: Boolean (not Int — bulk copy rejects Integer for BIT)
+     * - Temporal columns: formatted Strings (parsed by the driver using our formatters)
      */
     private fun enrichedValueToJdbcValue(value: EnrichedAirbyteValue): Any? {
         return when (val v = value.abValue) {
@@ -361,7 +404,7 @@ class AirbyteBulkRecord(
             is StringValue -> v.value
             is IntegerValue -> v.value.toLong()
             is NumberValue -> v.value
-            is BooleanValue -> if (v.value) 1 else 0 // BIT columns need 0/1
+            is BooleanValue -> v.value
             is DateValue -> v.value.toString()
             is TimestampWithTimezoneValue -> v.value.format(TIMESTAMP_TZ_FORMAT)
             is TimestampWithoutTimezoneValue -> v.value.format(TIMESTAMP_FORMAT)

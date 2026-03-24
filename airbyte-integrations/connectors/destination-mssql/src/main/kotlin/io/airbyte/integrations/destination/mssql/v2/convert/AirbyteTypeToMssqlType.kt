@@ -26,7 +26,13 @@ import java.sql.Types
 
 enum class MssqlType(val sqlType: Int, val sqlStringOverride: String? = null) {
     TEXT(Types.LONGVARCHAR),
-    BIT(Types.BOOLEAN),
+    /**
+     * Use Types.BIT (-7) instead of Types.BOOLEAN (16) because the SQL Server JDBC
+     * bulk copy API (SQLServerBulkCopy) does not support Types.BOOLEAN.
+     * Both map to SQL Server's BIT column type, but only Types.BIT is recognized
+     * by the bulk copy driver's getDestTypeFromSrcType().
+     */
+    BIT(Types.BIT),
     DATE(Types.DATE),
     BIGINT(Types.BIGINT),
     /**
@@ -36,7 +42,13 @@ enum class MssqlType(val sqlType: Int, val sqlStringOverride: String? = null) {
     DECIMAL(Types.DECIMAL, sqlStringOverride = "DECIMAL(38, 8)"),
     VARCHAR(Types.VARCHAR, sqlStringOverride = "VARCHAR(MAX)"),
     VARCHAR_INDEX(Types.VARCHAR, sqlStringOverride = "VARCHAR(200)"),
-    DATETIMEOFFSET(Types.TIMESTAMP_WITH_TIMEZONE),
+    /**
+     * Use microsoft.sql.Types.DATETIMEOFFSET (-155) instead of
+     * java.sql.Types.TIMESTAMP_WITH_TIMEZONE (2014) because SQLServerBulkCopy
+     * does not support TIMESTAMP_WITH_TIMEZONE for DATETIMEOFFSET columns.
+     * See: https://github.com/microsoft/mssql-jdbc/issues/1444
+     */
+    DATETIMEOFFSET(microsoft.sql.Types.DATETIMEOFFSET),
     TIME(Types.TIME),
     /**
      * Legacy DATETIME type — only used when reading existing schema from INFORMATION_SCHEMA.

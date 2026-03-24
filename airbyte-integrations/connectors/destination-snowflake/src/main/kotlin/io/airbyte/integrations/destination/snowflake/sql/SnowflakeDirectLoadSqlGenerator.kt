@@ -336,8 +336,9 @@ class SnowflakeDirectLoadSqlGenerator(
 
         // CDC soft delete mode: carry forward data columns from non-delete rows to delete rows.
         // When insert+delete or update+delete happen in the same CDC batch, the dedup picks the
-        // latest row (the delete), which only contains the _id. We use a subquery to find the
-        // latest non-delete row's data columns per PK and COALESCE them into the delete row.
+        // latest row (the delete), which only contains the _id. We use LAG() IGNORE NULLS to
+        // look back at the previous row's data columns within the same partition, avoiding an
+        // expensive LEFT JOIN. The QUALIFY clause handles deduplication in a single pass.
         val airbyteMetaColumns = setOf(
             SNOWFLAKE_AB_RAW_ID,
             SNOWFLAKE_AB_EXTRACTED_AT,
@@ -351,45 +352,40 @@ class SnowflakeDirectLoadSqlGenerator(
             column !in airbyteMetaColumns && !isCdcMetaColumn
         }
 
-        // For the final SELECT: when the winning row is a delete, COALESCE with the latest
-        // non-delete row's data from the same batch. This is done by joining the deduped
-        // result with a "best non-delete data" CTE.
-        val finalColumnList = allColumns.joinToString(",\n      ") { column ->
-            if (column in dataColumns) {
-                "CASE WHEN d.\"${SNOWFLAKE_AB_CDC_DELETED_AT_COLUMN}\" IS NOT NULL AND nd.${column.quote()} IS NOT NULL THEN nd.${column.quote()} ELSE d.${column.quote()} END AS ${column.quote()}"
+        // Build the window ORDER BY for LAG (ascending order so LAG looks back at prior rows)
+        val cursorAscClause =
+            if (cursor != null) {
+                "COALESCE(${cursor.quote()}, 0),"
             } else {
-                "d.${column.quote()}"
+                ""
+            }
+        val lagWindowOrderClause = "$cursorAscClause \"$SNOWFLAKE_AB_EXTRACTED_AT\""
+
+        // For data columns: when the row is a delete, use LAG() IGNORE NULLS to carry forward
+        // the data from the most recent non-null value (i.e., the preceding insert/update).
+        // COALESCE handles the fallback to the row's own value if LAG returns null.
+        val selectColumns = allColumns.joinToString(",\n      ") { column ->
+            if (column in dataColumns) {
+                """CASE
+      WHEN "${SNOWFLAKE_AB_CDC_DELETED_AT_COLUMN}" IS NOT NULL
+        THEN COALESCE(LAG(${column.quote()}) IGNORE NULLS OVER (
+          PARTITION BY $pkList
+          ORDER BY $lagWindowOrderClause
+        ), ${column.quote()})
+      ELSE ${column.quote()}
+    END AS ${column.quote()}"""
+            } else {
+                column.quote()
             }
         }
 
         return """
-            |  WITH records AS (
-            |    SELECT
-            |      $columnList
+            |  SELECT
+            |      $selectColumns
             |    FROM ${fullyQualifiedName(sourceTableName)}
-            |  ), numbered_rows AS (
-            |    SELECT *, ROW_NUMBER() OVER (
+            |    QUALIFY ROW_NUMBER() OVER (
             |      PARTITION BY $pkList ORDER BY $windowOrderClause
-            |    ) AS row_number
-            |    FROM records
-            |  ), deduped AS (
-            |    SELECT $columnList
-            |    FROM numbered_rows
-            |    WHERE row_number = 1
-            |  ), non_delete_numbered AS (
-            |    SELECT *, ROW_NUMBER() OVER (
-            |      PARTITION BY $pkList ORDER BY $windowOrderClause
-            |    ) AS row_number
-            |    FROM records
-            |    WHERE "${SNOWFLAKE_AB_CDC_DELETED_AT_COLUMN}" IS NULL
-            |  ), best_non_delete AS (
-            |    SELECT $columnList
-            |    FROM non_delete_numbered
-            |    WHERE row_number = 1
-            |  )
-            |  SELECT $finalColumnList
-            |  FROM deduped d
-            |  LEFT JOIN best_non_delete nd ON ${pks.joinToString(" AND ") { "d.${it.quote()} = nd.${it.quote()}" }}
+            |    ) = 1
         """
             .trimMargin()
             .andLog()
